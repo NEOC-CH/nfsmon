@@ -1,0 +1,136 @@
+# nfsmon configuration file
+#
+# Lookup order at startup:
+#   1. /etc/nfsmon.conf            (system-wide defaults)
+#   2. ~/.config/nfsmon.conf       (user override; later keys win)
+#
+# The Options popup ("o" key) writes back to ~/.config/nfsmon.conf.
+# Copy this file to either location and uncomment / edit the keys you want.
+#
+# All sections and keys are optional — anything missing falls back to the
+# built-in default.
+
+[general]
+# Tick interval in seconds (1-9999). Editable in the popup [defaults] tab.
+# interval = 2
+
+# NFS server port to filter ss output by (1-65535). Editable in the popup.
+# port = 2049
+
+# Aggregate clients by /24 subnet (true/false).
+# group_subnet = false
+
+# Show IP instead of hostname in the HOST column on startup. The Shift+i
+# hotkey toggles this at runtime; the saved value is the last-seen state.
+# show_ip = false
+
+# Initial sort. sort_key is one of: sent / recv / dsent / drecv /
+# rate_sent / rate_recv / activity / conns / age / last_seen / ip /
+# host / nfsv / mount / rtt_avg. sort_rev = true → descending.
+# (TREND has no sort key — sparkline strings aren't comparable.)
+# sort_key = sent
+# sort_rev = true
+
+# Active theme. Empty / unset = built-in defaults. Named theme loads
+# ~/.config/nfsmon/colors/<theme>.conf and overrides individual [colors]
+# entries below. Cyclable via the [defaults] tab in the o-popup.
+# theme =
+
+# Highlight the actively-sorted column with the bright color variant
+# (strips A_DIM, ORs in A_BOLD). Toggle in the [defaults] tab.
+# bright_sort_col = false
+
+# Show previously-seen-but-currently-disconnected clients as ghost rows
+# below the live set. Each ghost keeps the last-known totals/host with
+# rates/conns zeroed out. The SEEN column shows how long ago they were
+# last live (e.g. "5m 30s", "2h", "3d"). Toggle in the [defaults] tab.
+# show_seen_clients = false
+
+# Watchdog — log a "disconnect" event line each time an IP transitions
+# from live (in the previous tick's connections) to absent (not in the
+# current tick). One row per event with timestamp, ip, host, last
+# sent/recv totals. Toggle in the [defaults] tab; path is in [watchdog].
+# watchdog_enabled = false
+
+# TREND column width (sparkline length). Range 10-40, default 10.
+# Editable in the [defaults] tab — wider columns show more history but
+# eat horizontal space. Out-of-range values from config are clamped
+# back to the default at startup.
+# spark_len = 10
+
+
+[csv]
+# Enable continuous CSV logging of per-IP totals + rates each tick.
+# enabled = false
+# path    = /var/log/nfsmon.csv
+
+
+[columns]
+# Column visibility — set to false to hide. Defaults shown here:
+# host      = true
+# nfsv      = false
+# mount     = false
+# rtt_avg   = false
+# conns     = true
+# age       = true
+# last_seen = false   ; "SEEN" — relative time since last live; pairs with show_seen_clients
+# sent      = true
+# dsent     = true
+# rate_sent = false
+# recv      = true
+# drecv     = true
+# rate_recv = false
+# spark     = false
+
+
+[alerts]
+# Per-row alert: row blinks in the alert color when sustained activity
+# (rate_sent + rate_recv) exceeds threshold_mb MB/s for duration_sec
+# seconds. The footer shows ALERT:<n> while any row is alerting.
+# threshold_mb = 10
+# duration_sec = 5
+
+
+[watchdog]
+# Path to the disconnect-event log. One CSV-shaped row per detected
+# disconnect (timestamp,event,ip,host,last_sent,last_recv). Header is
+# written when the file is created. Default below; pair with
+# general.watchdog_enabled to actually start writing.
+# path = /var/log/nfsmon-events.log
+
+
+[colors]
+# Per-role foreground color + optional attributes. Each value is
+# "fg_color" or "fg_color,attr1,attr2,...".
+#
+# fg_color values:
+#   - 8 base names:    default, black, red, green, yellow, blue,
+#                      magenta, cyan, white
+#   - 256-color aliases (only render correctly on a 256-color terminal):
+#                      gray, darkgray, lightgray, silver, darkred,
+#                      darkgreen, lightgreen, lime, mint, darkyellow,
+#                      gold, orange, darkorange, peach, darkblue,
+#                      lightblue, navy, teal, royalblue, darkcyan,
+#                      lightcyan, purple, lightpurple, pink, hotpink,
+#                      lightpink, brown, tan
+#   - numeric 0-255    (e.g. "208" = orange1, "33" = cobalt blue)
+#
+#   Codes that the terminal can't render fall back to the role's
+#   built-in default per role; no crash. Full reference + 256-color
+#   preview command: see color.md next to this file.
+#
+# attr names:     bold, dim, blink, reverse, underline, standout, normal
+#
+# Roles (showing built-in defaults):
+# title           = cyan,bold
+# key_bar         = yellow,bold
+# text            = green
+# footer          = cyan
+# alert           = red,bold,blink
+# idle            = white,dim
+# activity_low    = green
+# activity_medium = yellow,bold
+# activity_high   = red,bold
+#
+# When a [theme] is selected (see general.theme), values from
+# ~/.config/nfsmon/colors/<theme>.conf override individual roles here.
