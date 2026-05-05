@@ -1,19 +1,13 @@
 # nfsmon — NFSv4 Server-side Traffic Monitor
 
-A curses TUI for watching NFSv4 traffic on the **server**. Shows, per
-connected client, live: total bytes + delta since start, B/s rates,
-connection count, connection age, NFS version, mounted path, TCP RTT,
-sparkline trend, and how long ago a client was last seen. Includes
-filtering, sorting, pause, follow, /24 subnet aggregation, CSV logging,
-alerts, watchdog (disconnect logging), themes (8-color base + 256-color
-aliases), and persistent configuration.
+A curses TUI for watching NFSv4 traffic on the **server**. Shows, per connected client, live: total bytes + delta since start, B/s rates, connection count, connection age, NFS version, mounted path, TCP RTT, sparkline trend, and how long ago a client was last seen. Includes filtering, sorting, pause, follow, /24 subnet aggregation, CSV logging, alerts, watchdog (disconnect logging), themes (8-color base + 256-color aliases), and persistent configuration.
 
 ```
 NFS Traffic  port:2049  14:32:07  interval:2s  since:09:14:11  (05:17:56)
- HOST                            CONNS    CONNECTED        SENT       ΔSENT     B/s SENT
- vp-app-01.xxx.tld                   8     04:21:33      4.2 GiB    1.1 GiB   1.4 MiB/s
- vp-app-02.xxx.tld                   8     04:18:02      3.8 GiB  892.3 MiB   2.1 MiB/s
- vp-batch-03.xxx.tld                 4     03:55:11   821.4 MiB  120.5 MiB  340.2 KiB/s
+ HOST                         CONNS    CONNECTED        SENT       ΔSENT    B/s SENT
+ app-01.xxx.tld                   8     04:21:33      4.2 GiB    1.1 GiB   1.4 MiB/s
+ app-02.xxx.tld                   8     04:18:02      3.8 GiB  892.3 MiB   2.1 MiB/s
+ batch-03.xxx.tld                 4     03:55:11    821.4 MiB  120.5 MiB 340.2 KiB/s
  ...
  clients:14  total conns:48  sent:18.4 GiB  recv:6.7 GiB    sort:sent↓  /:filter  o:opts ...
 ```
@@ -51,15 +45,11 @@ NFS Traffic  port:2049  14:32:07  interval:2s  since:09:14:11  (05:17:56)
 
 ## Prerequisites
 
-- Linux kernel ≥ 5.3 (for the `ss -ti` RTT stats; on older kernels the
-  RTT column stays empty, everything else still works)
+- Linux kernel ≥ 5.3 (for the `ss -ti` RTT stats; on older kernels the   RTT column stays empty, everything else still works)
 - Python ≥ 3.8 with the `curses` module (standard on every distro Python)
 - `iproute2` (the `ss` binary) on `PATH`
-- Read access to `/proc/fs/nfsd/clients/*/{info,states}` for the NFSv
-  version + mount path detection — i.e. run as `root` or with the
-  equivalent capabilities
-- A terminal with ≥ 8 colors (better: `$TERM` contains `-256color` so
-  the 256-color aliases and themes render correctly)
+- Read access to `/proc/fs/nfsd/clients/*/{info,states}` for the NFSv version + mount path detection — i.e. run as `root` or with the equivalent capabilities
+- A terminal with ≥ 8 colors (better: `$TERM` contains `-256color` so the 256-color aliases and themes render correctly)
 
 Not required: pip packages — everything is from the standard library.
 
@@ -107,9 +97,9 @@ Quit anytime with `q` or `Ctrl-C`.
 ┌──────────────────────────────────────────────────────────────────┐
 │ NFS Traffic  port:2049  14:32:07  interval:2s  since:09:14:11 ...│  ← Title row
 │ HOST           CONNS  CONNECTED  SENT  ΔSENT  B/s SENT  ...      │  ← Header (bold + underline)
-│ vp-app-01.xxx.tld ...                                            │  ← Data rows (one per client)
+│ app-01.xxx.tld ...                                               │  ← Data rows (one per client)
 │ ...                                                              │
-│ vp-stale-99.xxx.tld ...                                10m 5s    │  ← Ghost rows (last-seen)
+│ stale-99.xxx.tld ...                                   10m 5s    │  ← Ghost rows (last-seen)
 │                                                                  │
 │ clients:14  total conns:48  ...  sort:sent↓  /:filter  o:opts ...│  ← Footer (status + hint)
 └──────────────────────────────────────────────────────────────────┘
@@ -211,7 +201,7 @@ rows, `space` toggles/activates, `Tab` jumps to the
 │  Watchdog (log disconnects):  [ ]  /var/log/nfsmon-events.log      │
 │  TREND length:  [10]  (10-40)                                      │
 │                                                                    │
-│ Tab:save  ←→:tabs  ↑↓:sel  space:toggle  Esc:close   [Save Settings]│
+│ Tab:save  ←→:tabs  ↑↓:sel  space:toggle  Esc:close [Save Settings] │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -277,25 +267,18 @@ Always saves to `~/.config/nfsmon.conf`. `/etc/nfsmon.conf` is **never** overwri
 - `v` toggles only the direction (`sort_rev`), keeping the current key.
 - Footer shows the current sort as `sort:<key>↓` or `sort:<key>↑`.
 
-With **Bright sorted column** active, the column corresponding to the
-sort is also re-rendered per row with `(attr & ~A_DIM) | A_BOLD` —
-effectively the bright variant of the role.
+With **Bright sorted column** active, the column corresponding to the sort is also re-rendered per row with `(attr & ~A_DIM) | A_BOLD` effectively the bright variant of the role.
 
 ---
 
 ## Filtering and grouping
 
-- `/` opens an input-line mode in the footer. The substring is matched
-  against `host` and `ip` (lowercase). `Esc` discards, `Enter` applies.
-- While filtering, the cursor stays visible (`/<text>_`) and the footer
-  shows `Enter:apply  Esc:cancel`.
-- An active filter shows up in the hint as `filter:<text>`. Open the
-  filter again with `/`; an empty string clears it.
-- `g` toggles **group by /24**. IPs are bucketed into `10.0.10.0/24`
-  groups; numeric fields are summed, `age` is the oldest `first_seen`
-  in the group. `RTT` stays empty (aggregation isn't meaningful).
+- `/` opens an input-line mode in the footer. The substring is matched against `host` and `ip` (lowercase). `Esc` discards, `Enter` applies.
+- While filtering, the cursor stays visible (`/<text>_`) and the footer shows `Enter:apply  Esc:cancel`.
+- An active filter shows up in the hint as `filter:<text>`. Open the filter again with `/`; an empty string clears it.
+- `g` toggles **group by /24**. IPs are bucketed into `10.0.10.0/24` groups; numeric fields are summed, `age` is the oldest `first_seen` in the group. `RTT` stays empty (aggregation isn't meaningful).
 
-Filter and grouping apply to live rows. For ghost rows (last-seen):
+Filter and grouping apply to live rows. For ghost rows (last-seen): 
 filter is applied, grouping is not — ghosts stay individually
 identifiable at the bottom.
 
@@ -303,20 +286,13 @@ identifiable at the bottom.
 
 ## Selection, follow, and ghost row
 
-- `↑`/`↓`/`PgUp`/`PgDn` set `selected_ip`. The selection is marked with
-  `A_REVERSE`.
-- The selection auto-hides after 5 s of no input (except in follow
-  mode).
-- `Enter` on the selection opens a detail popup with extra per-client
-  info (NFSv, mount, etc., depending on what `fetch_detail` returns).
-- `f` toggles **follow**: the selection is pinned to the current IP
-  (no auto-hide, no drop on disconnect). When the followed IP falls
-  out of the visible set, its last snapshot row is rendered as a
+- `↑`/`↓`/`PgUp`/`PgDn` set `selected_ip`. The selection is marked with `A_REVERSE`.
+- The selection auto-hides after 5 s of no input (except in follow mode).
+- `Enter` on the selection opens a detail popup with extra per-client info (NFSv, mount, etc., depending on what `fetch_detail` returns).
+- `f` toggles **follow**: the selection is pinned to the current IP (no auto-hide, no drop on disconnect). When the followed IP falls out of the visible set, its last snapshot row is rendered as a
   **ghost row** at the bottom (dimmed + reversed).
 
-Note: this follow-ghost row is independent of the **last-seen** feature
-(see next section). The follow-ghost is *one* IP you're explicitly
-following. Last-seen ghosts are *all* IPs that have ever connected.
+Note: this follow-ghost row is independent of the **last-seen** feature (see next section). The follow-ghost is *one* IP you're explicitly following. Last-seen ghosts are *all* IPs that have ever connected.
 
 ---
 
@@ -324,10 +300,7 @@ following. Last-seen ghosts are *all* IPs that have ever connected.
 
 Toggle: `o` → `[defaults]` → `Show last-seen clients` → `space`.
 
-When active, clients that previously appeared in `ss` but no longer do
-are shown as additional rows **below** the live clients — with all their
-last-known values (HOST, SENT, RECV, ΔSENT, ΔRECV) and `B/s = 0`,
-`CONNS = 0`, `activity = 0`. The `SEEN` column shows how long ago that
+When active, clients that previously appeared in `ss` but no longer do are shown as additional rows **below** the live clients — with all their last-known values (HOST, SENT, RECV, ΔSENT, ΔRECV) and `B/s = 0`, `CONNS = 0`, `activity = 0`. The `SEEN` column shows how long ago that
 was (`now`, `15s`, `5m 30s`, `1h 25m`, `3d 5h`).
 
 Two state variables hold this in memory:
@@ -335,21 +308,12 @@ Two state variables hold this in memory:
 - `last_seen: Dict[str, float]` — IP → timestamp of latest appearance
 - `seen_snapshot: Dict[str, Dict]` — IP → last concrete data snapshot
 
-Both are updated each tick for every live IP. The stale-IP cleanup in
-the tick (which drops `first_seen`, `baseline`, `prev_totals` for IPs
-no longer live) **deliberately does not touch these two**.
-
-Sorting: live rows are sorted by `sort_key`; ghost rows are *also*
-sorted by `sort_key` — but the ghost block always stays **below** the
-live block, regardless of direction.
+Both are updated each tick for every live IP. The stale-IP cleanup in the tick (which drops `first_seen`, `baseline`, `prev_totals` for IPs no longer live) **deliberately does not touch these two**. Sorting: live rows are sorted by `sort_key`; ghost rows are *also* 
+sorted by `sort_key` — but the ghost block always stays **below** the live block, regardless of direction. 
 
 `l` is the direct hotkey for "Sort by SEEN".
 
-**Memory**: `last_seen`/`seen_snapshot` grow unbounded (one entry per
-IP we've ever seen). That's intentional — once seen, an IP stays
-discoverable. In practice you get a few dozen to a few hundred IPs
-per day; even after weeks that's only a few MB. If you ever need a
-cap (e.g. only the last 24 h), add a cleanup loop every N ticks.
+**Memory**: `last_seen`/`seen_snapshot` grow unbounded (one entry per IP we've ever seen). That's intentional — once seen, an IP stays discoverable. In practice you get a few dozen to a few hundred IPs per day; even after weeks that's only a few MB. If you ever need a cap (e.g. only the last 24 h), add a cleanup loop every N ticks.
 
 ---
 
@@ -357,33 +321,19 @@ cap (e.g. only the last 24 h), add a cleanup loop every N ticks.
 
 Toggle: `o` → `[defaults]` → `Bright sorted column` → `space`.
 
-When active, the currently active sort column is re-rendered per data
-row with:
+When active, the currently active sort column is re-rendered per data row with:
 
 ```python
 bright_attr = (attr & ~curses.A_DIM) | curses.A_BOLD
 ```
 
-Effect: `A_DIM` is stripped, `A_BOLD` is added — on most terminals the
-column appears in the bright variant of its role. Idle rows are lifted
-out of the dimmed tone into full intensity; color tiers move to their
-bright versions.
-
-Special case: when `Shift+i` is active (HOST column shows IP) and you
-sort by `i`/IP, the HOST column (which is currently displaying IP) is
-treated as the "active sort column".
+Effect: `A_DIM` is stripped, `A_BOLD` is added — on most terminals the column appears in the bright variant of its role. Idle rows are lifted out of the dimmed tone into full intensity; color tiers move to their bright versions. Special case: when `Shift+i` is active (HOST column shows IP) and you sort by `i`/IP, the HOST column (which is currently displaying IP) is treated as the "active sort column".
 
 ---
 
 ## Snapshot dumps
 
-`Shift+d` writes a plain-text dump of the currently visible view to
-`/tmp/nfsmon_snapshot.txt`. The content mirrors exactly what's on
-screen — same filter, same sort, same columns, same IP/HOST display.
-
-Use case: pinning the current state without taking a screenshot, e.g.
-to attach to tickets, emails, bug reports. The footer flashes a
-confirmation with the file path for 3 s.
+`Shift+d` writes a plain-text dump of the currently visible view to `/tmp/nfsmon_snapshot.txt`. The content mirrors exactly what's on screen — same filter, same sort, same columns, same IP/HOST display. Use case: pinning the current state without taking a screenshot, e.g. to attach to tickets, emails, bug reports. The footer flashes a confirmation with the file path for 3 s.
 
 ---
 
@@ -391,8 +341,7 @@ confirmation with the file path for 3 s.
 
 Toggle: `o` → `[defaults]` → `CSV Log` → `space`. Default: off.
 
-When on, the tool writes **one row per client per tick** to
-`/var/log/nfsmon.csv` (or the path set in the config). Format:
+When on, the tool writes **one row per client per tick** to `/var/log/nfsmon.csv` (or the path set in the config). Format:
 
 ```csv
 timestamp,ip,host,sent,recv,dsent,drecv,rate_sent,rate_recv,conns
