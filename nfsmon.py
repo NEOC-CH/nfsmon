@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# tools/nfsmon.py
+# nfsmon.py
 
 import argparse
 import configparser
@@ -1084,6 +1084,10 @@ def aggregate_by_subnet(conns: List[Dict]) -> List[Dict]:
                 "sent": 0, "recv": 0, "dsent": 0, "drecv": 0,
                 "rate_sent": 0.0, "rate_recv": 0.0, "activity": 0.0,
                 "rtt_avg": 0.0,    # left at 0 → empty cell in subnet rows
+                # Non-aggregatable fields stay present-but-empty (blank
+                # cells) so every sort_key remains usable while grouped
+                # instead of raising KeyError in compute_visible.
+                "nfsv": "", "mount": "", "spark": "", "last_seen": 0.0,
             }
             groups[subnet] = g
         g["conns"] += c["conns"]
