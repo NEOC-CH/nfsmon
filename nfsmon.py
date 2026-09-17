@@ -621,6 +621,17 @@ def _build_active_cols(cols_visible: Dict[str, bool], show_ip_in_host: bool,
     return out
 
 
+FIRST_DATA_ROW = 2   # rows 0 and 1 are the title and the column header
+
+
+def data_rows(height: int, ghost_active: bool) -> int:
+    # Number of data rows that fit between the column header and the footer.
+    # The follow-ghost row (when shown) reserves the line above the footer.
+    # Single source of truth for draw() and the viewport logic in main().
+    reserved = 3 + (1 if ghost_active else 0)   # title + header + footer (+ ghost)
+    return max(1, height - reserved)
+
+
 # Tabs in the Options popup. Each tab holds uniform item kinds (no headers
 # or spacers); Tab/Shift-Tab cycles tabs, ↑/↓ navigates within the active
 # tab. New tabs ([export], [alerts], ...) get added when those features land.
@@ -666,11 +677,12 @@ HELP_LINES = [
     ("  v",         "Toggle sort direction ↑↓"),
     ("─── View ─────────────────────────────────", None),
     ("  /",         "Filter by host or IP (substring)"),
-    ("  ↑/↓",       "Select row"),
-    ("  PgUp/PgDn", "Select ±5 rows"),
+    ("  ↑/↓",       "Select row (view scrolls along)"),
+    ("  PgUp/PgDn", "Select ±10 rows"),
+    ("  Home/End",  "Jump to first / last row (vim: gg / G)"),
     ("  Enter",     "Show detail (selected row)"),
     ("  f",         "Follow selection (pin / unpin)"),
-    ("  g",         "Group by /24 subnet"),
+    ("  g",         "Group by /24 subnet (gg jumps to top)"),
     ("  Shift+i",   "Toggle host column: hostname ↔ IP"),
     ("─── Actions ──────────────────────────────", None),
     ("  o",         "Open Options popup"),
@@ -682,8 +694,7 @@ HELP_LINES = [
     ("  q",         "Quit"),
     ("  Esc",       "Close popup / cancel input"),
     ("──────────────────────────────────────────", None),
-    ("TREND has no sort key (sparkline is not comparable);", ""),
-    ("use the [sort] tab in the Options popup if needed.",  ""),
+    ("TREND has no sort key; use the [sort] tab in Options.", ""),
     ("ΔSENT/ΔRECV = bytes since baseline (z resets).",      ""),
 ]
 
@@ -1188,7 +1199,8 @@ def draw(stdscr, visible: List[Dict], total_count: int,
          show_seen_clients: bool = False,
          watchdog_enabled: bool = False,
          watchdog_path: str = "",
-         spark_len: int = SPARK_LEN) -> None:
+         spark_len: int = SPARK_LEN,
+         scroll_top: int = 0) -> None:
     height, width = stdscr.getmaxyx()
     stdscr.erase()
 
@@ -1213,11 +1225,11 @@ def draw(stdscr, visible: List[Dict], total_count: int,
 
     # ghost row: when following an IP that's not currently visible, we
     # render a stale snapshot at the very bottom data row. Reserve that row
-    # by stopping regular rendering one line earlier.
+    # by giving the regular rows one line less.
     visible_ips  = {c["ip"] for c in visible}
     ghost_active = bool(followed_ip and followed_snapshot
                         and followed_ip not in visible_ips)
-    last_row     = (height - 3) if ghost_active else (height - 2)
+    page_rows    = data_rows(height, ghost_active)
 
     # bright-sort-column overlay: identify the active_cols index whose id
     # matches sort_key. Special case: when show_ip_in_host is True, sorting
@@ -1237,12 +1249,11 @@ def draw(stdscr, visible: List[Dict], total_count: int,
     else:
         sort_col_w = sort_col_start = 0
 
-    # data rows — color each row by current throughput rate;
+    # data rows — the viewport starts at scroll_top (main() keeps the
+    # selected row inside it); color each row by current throughput rate,
     # selected row gets reverse-video on top of the activity color.
-    for idx, c in enumerate(visible):
-        row = 2 + idx
-        if row > last_row:
-            break
+    for idx, c in enumerate(visible[scroll_top:scroll_top + page_rows]):
+        row = FIRST_DATA_ROW + idx
         parts = []
         for _, _, w, align, fn in active_cols:
             s = fn(c)
@@ -1295,6 +1306,11 @@ def draw(stdscr, visible: List[Dict], total_count: int,
                   f"  conns:{tc}  sent:{ts}  recv:{tr}")
     else:
         totals = f" clients:{total_count}  total conns:{tc}  sent:{ts}  recv:{tr}"
+    if len(visible) > page_rows:
+        # list overflows the screen: show which slice is on display
+        lo = scroll_top + 1
+        hi = min(len(visible), scroll_top + page_rows)
+        totals += f"  rows:{lo}-{hi}/{len(visible)}"
     arrow = "↓" if sort_rev else "↑"
     if filter_input_active:
         hint = f"/{filter_str}_  Enter:apply  Esc:cancel "
@@ -1466,8 +1482,11 @@ def main(stdscr) -> None:
     detail_text         = ""   # non-empty → detail popup is open
     last_input_time     = time.time()  # for 5s auto-hide of selection
     running             = True
-    PAGE_STEP           = 5    # rows per PgUp/PgDn jump
+    PAGE_STEP           = 10   # rows per PgUp/PgDn jump
     SELECTION_TIMEOUT   = 5.0  # seconds without input → hide selection
+    GG_TIMEOUT          = 0.5  # seconds a lone `g` waits for a second `g`
+    scroll_top          = 0    # index of the first data row on screen
+    pending_g           = 0.0  # timestamp of a `g` awaiting `gg`; 0 = none
 
     # column visibility — defaults: all on except B/s, TREND, NFSv, MOUNT, RTT
     # (off by default). Persisted overrides from cfg apply on top.
@@ -1532,6 +1551,26 @@ def main(stdscr) -> None:
     # row is rendered at the bottom from the last known snapshot.
     followed_ip:       Optional[str]  = None
     followed_snapshot: Optional[Dict] = None
+    visible: List[Dict]               = []
+
+    def _viewport_rows() -> int:
+        # Data rows currently available on screen (mirrors draw()'s layout).
+        height, _ = stdscr.getmaxyx()
+        ghost = bool(followed_ip and followed_snapshot
+                     and followed_ip not in {c["ip"] for c in visible})
+        return data_rows(height, ghost)
+
+    def _select_index(i: int) -> None:
+        # Move the cursor to visible[i] (clamped). In follow mode the pin
+        # tracks the cursor. The viewport is realigned before draw().
+        nonlocal selected_ip, followed_ip, followed_snapshot
+        if not visible:
+            return
+        i = max(0, min(len(visible) - 1, i))
+        selected_ip = visible[i]["ip"]
+        if followed_ip:
+            followed_ip       = selected_ip
+            followed_snapshot = visible[i]
 
     while running:
         now = time.time()
@@ -1539,6 +1578,12 @@ def main(stdscr) -> None:
         # auto-clear the snapshot flash-message after its timeout
         if snapshot_msg and now >= snapshot_msg_until:
             snapshot_msg = ""
+
+        # a lone `g` waits GG_TIMEOUT for a second `g` (vim "gg" = jump to
+        # the first row); when nothing follows it toggles /24 grouping.
+        if pending_g and now - pending_g > GG_TIMEOUT:
+            group_subnet = not group_subnet
+            pending_g    = 0.0
 
         # ----- tick: collect data continuously; pause only freezes display -
         if now - last_tick >= interval:
@@ -1738,6 +1783,9 @@ def main(stdscr) -> None:
 
         # ----- process every key --------------------------------------------
         for key in keys:
+            if pending_g and key != ord("g"):      # any other key settles a lone `g`
+                group_subnet = not group_subnet
+                pending_g    = 0.0
             if key == curses.KEY_RESIZE:
                 stdscr.clear()
             elif filter_input_active:
@@ -1934,7 +1982,11 @@ def main(stdscr) -> None:
                 filter_input_active = True
                 show_help           = False
             elif key == ord("g"):
-                group_subnet = not group_subnet
+                if pending_g and now - pending_g <= GG_TIMEOUT:   # gg → first row
+                    pending_g = 0.0
+                    _select_index(0)
+                else:
+                    pending_g = now
             elif key == ord("I"):
                 # Toggle the host column between hostname (DNS) and raw IP;
                 # column header swaps "HOST" ↔ "IP" accordingly. The standalone
@@ -1968,25 +2020,26 @@ def main(stdscr) -> None:
                 paused = not paused
                 frozen_conns = list(conns) if paused else None
             elif key in (curses.KEY_UP, curses.KEY_DOWN,
-                         curses.KEY_PPAGE, curses.KEY_NPAGE) and visible:
-                ips = [c["ip"] for c in visible]
-                if key == curses.KEY_UP:
-                    step = -1
-                elif key == curses.KEY_DOWN:
-                    step = 1
-                elif key == curses.KEY_PPAGE:
-                    step = -PAGE_STEP
-                else:
-                    step = PAGE_STEP
-                if selected_ip in ips:
+                         curses.KEY_PPAGE, curses.KEY_NPAGE,
+                         curses.KEY_HOME, curses.KEY_END) and visible:
+                ips  = [c["ip"] for c in visible]
+                step = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                        curses.KEY_PPAGE: -PAGE_STEP,
+                        curses.KEY_NPAGE: PAGE_STEP}.get(key, 0)
+                if key == curses.KEY_HOME:
+                    i = 0
+                elif key == curses.KEY_END:
+                    i = len(ips) - 1
+                elif selected_ip in ips:
                     i = ips.index(selected_ip) + step
                 else:
-                    i = 0 if step > 0 else len(ips) - 1
-                i = max(0, min(len(ips) - 1, i))
-                selected_ip = ips[i]
-                if followed_ip:                        # follow target tracks selection
-                    followed_ip       = selected_ip
-                    followed_snapshot = visible[i]
+                    # no cursor yet: it appears at the edge of the current
+                    # viewport (top for downward keys, bottom for upward)
+                    page = _viewport_rows()
+                    i = scroll_top if step > 0 else min(len(ips), scroll_top + page) - 1
+                _select_index(i)
+            elif key == ord("G") and visible:          # vim: jump to last row
+                _select_index(len(visible) - 1)
             elif key in (10, 13, curses.KEY_ENTER) and visible:
                 target = selected_ip if selected_ip in [c["ip"] for c in visible] else visible[0]["ip"]
                 detail_text = fetch_detail(target)
@@ -2034,6 +2087,18 @@ def main(stdscr) -> None:
         if not running:
             break
 
+        # ----- viewport: clamp the offset, keep the cursor on screen --------
+        page_rows  = _viewport_rows()
+        scroll_top = max(0, min(scroll_top, len(visible) - page_rows))
+        if selected_ip:
+            for i, c in enumerate(visible):
+                if c["ip"] == selected_ip:
+                    if i < scroll_top:
+                        scroll_top = i
+                    elif i >= scroll_top + page_rows:
+                        scroll_top = i - page_rows + 1
+                    break
+
         # ----- render -------------------------------------------------------
         draw(stdscr, visible, len(display_source), sort_key, sort_rev, start_time,
              show_help, filter_str, filter_input_active,
@@ -2051,7 +2116,8 @@ def main(stdscr) -> None:
              show_seen_clients,
              watchdog_enabled,
              watchdog_path,
-             spark_len)
+             spark_len,
+             scroll_top=scroll_top)
         time.sleep(0.1)
 
 

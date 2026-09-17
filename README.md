@@ -163,11 +163,13 @@ aren't meaningfully comparable.
 | Key             | Effect                                     |
 | --------------- | ------------------------------------------ |
 | `/`             | Filter by host or IP substring             |
-| `↑` / `↓`       | Move selection cursor ±1                   |
-| `PgUp` / `PgDn` | Move selection ±5 rows                     |
+| `↑` / `↓`       | Move selection cursor ±1; the view scrolls to keep it on screen |
+| `PgUp` / `PgDn` | Move selection ±10 rows                    |
+| `Home` / `End`  | Jump to the first / last row               |
+| `gg` / `Shift+g`| Jump to the first / last row (vim style)   |
 | `Enter`         | Detail popup for the selected row          |
 | `f`             | Follow mode (pin selection to an IP)       |
-| `g`             | Group by /24 subnet                        |
+| `g`             | Group by /24 subnet — applied 0.5 s after the key, or at once when another key follows (the delay is what tells `g` and `gg` apart) |
 | `Shift+i`       | HOST column: hostname ↔ IP toggle          |
 
 ### Actions
@@ -303,8 +305,13 @@ identifiable at the bottom.
 
 ## Selection, follow, and ghost row
 
-- `↑`/`↓`/`PgUp`/`PgDn` set `selected_ip`. The selection is marked with
-  `A_REVERSE`.
+- `↑`/`↓`/`PgUp`/`PgDn`/`Home`/`End` (and vim-style `gg`/`Shift+g`) set
+  `selected_ip`. The selection is marked with `A_REVERSE`.
+- When the list is longer than the screen, the view scrolls so the
+  selection stays visible, and the footer shows the displayed slice as
+  `rows:12-40/87`. Without a cursor, `↓` starts at the top of the
+  current view and `↑` at its bottom; the scroll position survives the
+  cursor auto-hide.
 - The selection auto-hides after 5 s of no input (except in follow
   mode).
 - `Enter` on the selection opens a detail popup with extra per-client
@@ -380,6 +387,7 @@ treated as the "active sort column".
 `Shift+d` writes a plain-text dump of the currently visible view to
 `/tmp/nfsmon_snapshot.txt`. The content mirrors exactly what's on
 screen — same filter, same sort, same columns, same IP/HOST display.
+All rows are written, not only the slice currently scrolled into view.
 
 Use case: pinning the current state without taking a screenshot, e.g.
 to attach to tickets, emails, bug reports. The footer flashes a
