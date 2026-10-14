@@ -39,6 +39,9 @@ ALERT_DEFAULT_DUR = 5     # default alert duration in seconds (above threshold)
 WATCHDOG_DEFAULT_PATH = "/var/log/nfsmon-events.log"
 WATCHDOG_HEADER = ["timestamp", "event", "ip", "host", "last_sent", "last_recv"]
 
+DNS_TTL_OK   = 3600   # seconds a successful reverse lookup is cached
+DNS_TTL_FAIL = 300    # seconds before a failed reverse lookup is retried
+
 SPARK_LEN     = 10    # default TREND column width / rate-history samples
 SPARK_MIN_LEN = 10    # minimum spark_len accepted from [defaults] tab
 SPARK_MAX_LEN = 40    # maximum spark_len accepted from [defaults] tab
@@ -323,25 +326,48 @@ def save_config(interval: int, port: int, group_subnet: bool,
         return False
 
 
+# --- data-source health -----------------------------------------------------
+# Data sources degrade silently (empty rows/columns) rather than crash, but
+# the user still deserves to know *why* a column is empty. Each source sets
+# or clears its own entry; draw() shows the texts in the title row.
+_health: Dict[str, str] = {}
+
+
+def _set_health(source: str, msg: str) -> None:
+    if msg:
+        _health[source] = msg
+    else:
+        _health.pop(source, None)
+
+
+def health_warnings() -> List[str]:
+    return [_health[k] for k in sorted(_health)]
+
+
 # --- async DNS resolution ---------------------------------------------------
 # gethostbyaddr can stall multiple seconds on first lookup; doing it on the
 # UI thread froze input. Resolve in a daemon worker; callers get the IP
 # back immediately and the resolved name appears on a later redraw.
-_dns_cache:   Dict[str, str] = {}
-_dns_pending: Set[str]       = set()
-_dns_lock                    = threading.Lock()
-_dns_queue:   "Queue[str]"   = Queue()
+# Cache entries are (name, expires_at). A failed lookup is cached as the
+# bare IP for DNS_TTL_FAIL seconds and then retried, so a DNS hiccup at
+# startup no longer pins IPs into the HOST column until restart. Successes
+# expire after DNS_TTL_OK so renamed hosts eventually show up too; the old
+# name stays on screen while the refresh is pending.
+_dns_cache:   Dict[str, Tuple[str, float]] = {}
+_dns_pending: Set[str]                     = set()
+_dns_lock                                  = threading.Lock()
+_dns_queue:   "Queue[str]"                 = Queue()
 
 
 def _dns_worker() -> None:
     while True:
         ip = _dns_queue.get()
         try:
-            name = socket.gethostbyaddr(ip)[0]
+            name, ttl = socket.gethostbyaddr(ip)[0], DNS_TTL_OK
         except Exception:
-            name = ip
+            name, ttl = ip, DNS_TTL_FAIL
         with _dns_lock:
-            _dns_cache[ip] = name
+            _dns_cache[ip] = (name, time.time() + ttl)
             _dns_pending.discard(ip)
 
 
@@ -349,14 +375,16 @@ threading.Thread(target=_dns_worker, daemon=True).start()
 
 
 def resolve_host(ip: str) -> str:
+    now = time.time()
     with _dns_lock:
-        if ip in _dns_cache:
-            return _dns_cache[ip]
+        entry = _dns_cache.get(ip)
+        if entry is not None and (now < entry[1] or ip in _dns_pending):
+            return entry[0]
         if ip in _dns_pending:
             return ip
         _dns_pending.add(ip)
     _dns_queue.put(ip)
-    return ip
+    return entry[0] if entry is not None else ip
 
 
 def bytes_human(b: int) -> str:
@@ -406,8 +434,16 @@ def get_connections() -> List[Dict]:
             stderr=subprocess.PIPE,
             timeout=5,
         ).stdout.decode("utf-8", errors="replace")
-    except Exception:
+    except FileNotFoundError:
+        _set_health("ss", "ss not found (install iproute2)")
         return []
+    except subprocess.TimeoutExpired:
+        _set_health("ss", "ss timed out")
+        return []
+    except Exception:
+        _set_health("ss", "ss failed")
+        return []
+    _set_health("ss", "")
 
     # aggregate per ip -> {sent, recv, conns, rtt_sum, rtt_count}
     agg        = {}
@@ -544,7 +580,7 @@ def _mount_from_exports(devs: Set[Tuple[int, int]],
     return prefix if prefix not in ("", "/") else ",".join(cands)
 
 
-def read_nfsd_clients_info() -> Dict[str, Dict[str, str]]:
+def read_nfsd_clients_info(need_mount: bool = True) -> Dict[str, Dict[str, str]]:
     # Parse /proc/fs/nfsd/clients/<id>/{info,states} per peer. Cheap small
     # reads (~30 files even on a busy server). Returns ip -> {"nfsv": "4.2",
     # "mount": "/opt/exports/nfs-home"}. mount is derived from the client's
@@ -555,21 +591,29 @@ def read_nfsd_clients_info() -> Dict[str, Dict[str, str]]:
     #     5.14, mainline 6.x) -> the superblock "maj:min" of the open files
     #     mapped onto the export table (see _mount_from_exports).
     # Empty if the client has no open state or nothing can be mapped.
+    # need_mount=False skips the (comparatively large) states files when
+    # neither the MOUNT column nor a mount sort needs them.
     result: Dict[str, Dict[str, str]] = {}
     base = NFSD_CLIENTS_DIR
     if not os.path.isdir(base):
+        _set_health("nfsd", f"no {base} (nfsd not running?)")
         return result
     try:
         cids = os.listdir(base)
     except OSError:
+        _set_health("nfsd", f"no access to {base} (run as root)")
         return result
     export_devs: Optional[Dict[Tuple[int, int], List[str]]] = None   # loaded on first need
+    denied = 0
     for cid in cids:
         info_path   = os.path.join(base, cid, "info")
         states_path = os.path.join(base, cid, "states")
         try:
             with open(info_path) as f:
                 info = f.read()
+        except PermissionError:
+            denied += 1
+            continue
         except OSError:
             continue
         ip      = None
@@ -586,12 +630,14 @@ def read_nfsd_clients_info() -> Dict[str, Dict[str, str]]:
                 v = line.split(":", 1)[1].strip()
                 if v.isdigit():
                     version = f"4.{v}"
-        mount = ""
-        try:
-            with open(states_path) as f:
-                states = f.read()
-        except OSError:
-            states = ""
+        mount  = ""
+        states = ""
+        if need_mount:
+            try:
+                with open(states_path) as f:
+                    states = f.read()
+            except OSError:
+                pass
         if states:
             # A bare "/" (an open directory handle on the fs root) carries no
             # information and would collapse the common prefix, so skip it.
@@ -607,6 +653,10 @@ def read_nfsd_clients_info() -> Dict[str, Dict[str, str]]:
                     mount = _mount_from_exports(devs, export_devs)
         if ip:
             result[ip] = {"nfsv": version or "", "mount": mount}
+    if denied and not result:
+        _set_health("nfsd", f"no access to {base}/*/info (run as root)")
+    else:
+        _set_health("nfsd", "")
     return result
 
 
@@ -1214,6 +1264,7 @@ def write_snapshot(path: str, visible: List[Dict], total_count: int,
     if followed_ip:   state_parts.append(f"follow:{followed_ip}")
     if paused:        state_parts.append("PAUSED")
     if csv_enabled:   state_parts.append("CSV")
+    state_parts.extend(f"!{w}" for w in health_warnings())
 
     lines: List[str] = [
         f"NFS Traffic snapshot  port:{PORT}  "
@@ -1300,6 +1351,13 @@ def draw(stdscr, visible: List[Dict], total_count: int,
              f"  since:{time.strftime('%H:%M:%S', time.localtime(start_time))}"
              f"  ({elapsed_str(start_time)}) ")
     safe_addstr(stdscr, TITLE_ROW, 0, title.ljust(width)[:width - 1], C_TITLE)
+    warns = health_warnings()
+    if warns and len(title) + 2 < width - 1:
+        # data-source problems (no ss, no /proc/fs/nfsd access) — shown in
+        # the warning tier so an empty column is never a silent mystery
+        safe_addstr(stdscr, TITLE_ROW, len(title) + 1,
+                    (" ! " + "  ! ".join(warns) + " ")[:width - 1 - len(title) - 1],
+                    attr_for("activity_medium"))
 
     # column header — built from visible columns; HOST entry is swapped for
     # IP when show_ip_in_host is True (handled in _build_active_cols).
@@ -1760,8 +1818,16 @@ def main(stdscr) -> None:
                 if len(h) > spark_len:
                     del h[: len(h) - spark_len]
 
-            # NFS-server-side per-client info (NFSv version, ...) — keyed by IP
-            nfsd_info = read_nfsd_clients_info()
+            # NFS-server-side per-client info (NFSv version, mount) — keyed by
+            # IP. Only read what a visible column or the active sort needs;
+            # the states files are the expensive part.
+            need_nfsv  = cols_visible.get("nfsv", True)  or sort_key == "nfsv"
+            need_mount = cols_visible.get("mount", True) or sort_key == "mount"
+            if need_nfsv or need_mount:
+                nfsd_info = read_nfsd_clients_info(need_mount=need_mount)
+            else:
+                nfsd_info = {}
+                _set_health("nfsd", "")
 
             # merge age + delta + rate + spark + nfsv + mount + activity
             # into each connection. `activity` = combined live rate, used as
@@ -1959,7 +2025,7 @@ def main(stdscr) -> None:
                                        csv_enabled, csv_path,
                                        cols_visible, alert_mb, alert_dur,
                                        theme=current_theme,
-                                       colors=color_overrides,
+                                       colors=base_color_overrides,
                                        bright_sort_col=bright_sort_col,
                                        show_seen_clients=show_seen_clients,
                                        watchdog_enabled=watchdog_enabled,
@@ -1994,7 +2060,7 @@ def main(stdscr) -> None:
                                        csv_enabled, csv_path,
                                        cols_visible, alert_mb, alert_dur,
                                        theme=current_theme,
-                                       colors=color_overrides,
+                                       colors=base_color_overrides,
                                        bright_sort_col=bright_sort_col,
                                        show_seen_clients=show_seen_clients,
                                        watchdog_enabled=watchdog_enabled,

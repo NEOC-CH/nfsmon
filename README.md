@@ -249,6 +249,8 @@ Bottom-right of every tab. `Tab` toggles between the main area and the button:
 - `space` on the button → save + popup stays open
 
 Always saves to `~/.config/nfsmon.conf`. `/etc/nfsmon.conf` is **never** overwritten.
+`[colors]` is written with your own overrides only; the colors of the
+active theme stay in the theme file and are layered on at start-up.
 
 ---
 
@@ -584,7 +586,10 @@ In `themes/` (drop-in copy):
 
 Themes override the user config. If you want custom colors
 independent of any theme, put them in `[colors]` of `nfsmon.conf` and
-leave `theme =` empty.
+leave `theme =` empty. Saving from the Options popup keeps the two
+apart: only your own `[colors]` entries go to disk, never the theme's.
+(Configs saved by earlier versions may still carry theme colors in
+`[colors]` — delete those lines once if a theme switch looks off.)
 
 ### 256-color fallback
 
@@ -703,7 +708,8 @@ Per-tick data sources:
      export table; `fsid=0` pseudo-roots give way to their sub-exports
 
 4. **`socket.gethostbyaddr(ip)`** (in a daemon thread, cached)
-   - Reverse DNS for `c["host"]`. On failure: shows the IP string.
+   - Reverse DNS for `c["host"]`. On failure: shows the IP string and
+     retries after 5 min; successful lookups are refreshed after 1 h
 
 Tick order:
 1. Parse ss output → `raw`
@@ -713,7 +719,9 @@ Tick order:
    `alert_active` (but **not** from `last_seen` / `seen_snapshot`)
 4. Compute per-IP rates (delta vs. previous tick / dt)
 5. Advance the per-IP sparkline history
-6. Read NFSd info from `/proc/fs/nfsd` (NFSv + mount)
+6. Read NFSd info from `/proc/fs/nfsd` (NFSv + mount) — only what a
+   visible column or the active sort needs; `states` is skipped when
+   MOUNT is hidden
 7. Merge everything into the `conns` list
 8. `last_seen[ip] = now` + `seen_snapshot[ip] = ...` for every live IP
 9. Write a CSV row per client (when enabled)
@@ -731,7 +739,8 @@ UI loop (every 100 ms):
 `nfsmon` needs:
 
 - **Root or equivalent** for `/proc/fs/nfsd/clients/`. Without that
-  access, `NFSv` and `MOUNT` stay empty — the rest still works.
+  access, `NFSv` and `MOUNT` stay empty — the rest still works, and the
+  title row shows `! no access to /proc/fs/nfsd/clients (run as root)`.
 - `/var/log/nfsmon.csv` writable (when CSV logging is on). The default
   path is root-only writable; for non-root, configure a path under `$HOME`.
 - `/var/log/nfsmon-events.log` writable (when watchdog is on). Default
@@ -750,7 +759,7 @@ UI loop (every 100 ms):
 | Linux kernel | ≥ 5.3 for RTT | Older kernels: RTT column empty, otherwise OK |
 | Linux kernel | ≥ 5.3 for `/proc/fs/nfsd/clients/` | Older: NFSv/MOUNT empty |
 | Python | ≥ 3.8 | Older: f-strings + type hints don't compile |
-| `ss` binary | iproute2 present | Missing: tool starts but shows 0 connections |
+| `ss` binary | iproute2 present | Missing: tool starts with 0 connections and `! ss not found` in the title row |
 | Terminal colors | ≥ 8 | Fewer: themes fall back to `-1` (default fg) |
 | Terminal colors | < 256 | Codes ≥ COLORS revert per role to the built-in default |
 | `nconnect` (client) | optional | More CONNS per client when active (≥ 5.3 client kernel) |
@@ -792,7 +801,8 @@ UI loop (every 100 ms):
   (1 s) you'll notice the disk load.
 - **The reverse-DNS cache is process-local.** A restart wipes the
   cache. With slow DNS you'll briefly see IPs instead of hostnames
-  until the daemon thread catches up.
+  until the daemon thread catches up. Failed lookups are retried every
+  5 min, successful ones refreshed every hour.
 - **The `Shift+i` toggle affects only the HOST column, not the detail
   popup.** The detail popup always shows the IP plus the hostname (if
   known) — independent of the toggle.
