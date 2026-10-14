@@ -484,20 +484,86 @@ def _common_dir_prefix(paths: List[str]) -> str:
     return joined if joined else ""
 
 
+NFSD_CLIENTS_DIR   = "/proc/fs/nfsd/clients"
+EXPORT_TABLE_PATHS = ("/proc/fs/nfsd/exports", "/proc/fs/nfs/exports", "/etc/exports")
+
+
+def _unescape_export_path(s: str) -> str:
+    # nfsd writes blanks and specials in export paths as \ooo (octal).
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
+
+def _export_devices() -> Dict[Tuple[int, int], List[str]]:
+    # (major, minor) -> exported paths living on that filesystem. Read from
+    # the kernel's export table, falling back to /etc/exports; a path that
+    # cannot be stat'ed is skipped. A handful of lines + stats per tick.
+    out: Dict[Tuple[int, int], List[str]] = {}
+    for table in EXPORT_TABLE_PATHS:
+        try:
+            with open(table) as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            p = _unescape_export_path(line.split()[0])
+            if not p.startswith("/"):
+                continue
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            dev = (os.major(st.st_dev), os.minor(st.st_dev))
+            if p not in out.setdefault(dev, []):
+                out[dev].append(p)
+        if out:
+            break
+    return out
+
+
+def _mount_from_exports(devs: Set[Tuple[int, int]],
+                        export_devs: Dict[Tuple[int, int], List[str]]) -> str:
+    # Exports whose filesystem matches the device of an open file. Drop
+    # candidates that are ancestors of other candidates (the fsid=0
+    # pseudo-root pattern), then reduce what is left to one string.
+    cands: List[str] = []
+    for dev in devs:
+        for p in export_devs.get(dev, []):
+            if p not in cands:
+                cands.append(p)
+    cands = [p for p in cands
+             if not any(q != p and q.startswith(p.rstrip("/") + "/") for q in cands)]
+    if not cands:
+        return ""
+    if len(cands) == 1:
+        return cands[0]
+    cands.sort()
+    prefix = _common_dir_prefix(cands)
+    return prefix if prefix not in ("", "/") else ",".join(cands)
+
+
 def read_nfsd_clients_info() -> Dict[str, Dict[str, str]]:
     # Parse /proc/fs/nfsd/clients/<id>/{info,states} per peer. Cheap small
     # reads (~30 files even on a busy server). Returns ip -> {"nfsv": "4.2",
-    # "mount": "/exports/nfs-home"}. mount is approximated as the longest
-    # common dir prefix of currently open file paths in `states` — empty if
-    # the client has no open state, or if the kernel doesn't expose states.
+    # "mount": "/opt/exports/nfs-home"}. mount is derived from the client's
+    # open files in `states`:
+    #   * kernels that print absolute filenames -> longest common directory
+    #     prefix of those paths;
+    #   * kernels that print only the last two path components (RHEL 9's
+    #     5.14, mainline 6.x) -> the superblock "maj:min" of the open files
+    #     mapped onto the export table (see _mount_from_exports).
+    # Empty if the client has no open state or nothing can be mapped.
     result: Dict[str, Dict[str, str]] = {}
-    base = "/proc/fs/nfsd/clients"
+    base = NFSD_CLIENTS_DIR
     if not os.path.isdir(base):
         return result
     try:
         cids = os.listdir(base)
     except OSError:
         return result
+    export_devs: Optional[Dict[Tuple[int, int], List[str]]] = None   # loaded on first need
     for cid in cids:
         info_path   = os.path.join(base, cid, "info")
         states_path = os.path.join(base, cid, "states")
@@ -520,17 +586,25 @@ def read_nfsd_clients_info() -> Dict[str, Dict[str, str]]:
                 v = line.split(":", 1)[1].strip()
                 if v.isdigit():
                     version = f"4.{v}"
-        # mount: longest common dir prefix across all quoted absolute paths
-        # in the states file. Format varies a bit per kernel — we just pull
-        # any "/..."-style quoted strings rather than parsing the structure.
         mount = ""
         try:
             with open(states_path) as f:
                 states = f.read()
-            paths = re.findall(r'"(/[^"]+)"', states)
-            mount = _common_dir_prefix(paths)
         except OSError:
-            pass
+            states = ""
+        if states:
+            # A bare "/" (an open directory handle on the fs root) carries no
+            # information and would collapse the common prefix, so skip it.
+            paths = [p for p in re.findall(r'"(/[^"]+)"', states) if p != "/"]
+            if paths:
+                mount = _common_dir_prefix(paths)
+            else:
+                devs = {(int(a, 16), int(b, 16)) for a, b in
+                        re.findall(r'superblock: "([0-9a-fA-F]+):([0-9a-fA-F]+):\d+"', states)}
+                if devs:
+                    if export_devs is None:
+                        export_devs = _export_devices()
+                    mount = _mount_from_exports(devs, export_devs)
         if ip:
             result[ip] = {"nfsv": version or "", "mount": mount}
     return result
@@ -622,6 +696,8 @@ def _build_active_cols(cols_visible: Dict[str, bool], show_ip_in_host: bool,
 
 
 FIRST_DATA_ROW = 2   # rows 0 and 1 are the title and the column header
+SCROLL_TRACK   = "│"  # scrollbar track glyph (last screen column)
+SCROLL_THUMB   = "█"  # scrollbar thumb glyph
 
 
 def data_rows(height: int, ghost_active: bool) -> int:
@@ -1276,6 +1352,24 @@ def draw(stdscr, visible: List[Dict], total_count: int,
             seg_end     = min(sort_col_start + sort_col_w, width - 1)
             safe_addstr(stdscr, row, sort_col_start,
                         line[sort_col_start:seg_end], bright_attr)
+
+    # scrollbar: data rows stop at width-2, so the last column is free. When
+    # the list overflows the page, draw a track over the data rows with a
+    # thumb whose size/position mirror the visible slice.
+    total = len(visible)
+    if total > page_rows and width >= 2:
+        bar_col  = width - 1
+        thumb_h  = max(1, round(page_rows * page_rows / total))
+        max_top  = total - page_rows
+        thumb_at = round(scroll_top * (page_rows - thumb_h) / max_top) if max_top else 0
+        for i in range(page_rows):
+            r = FIRST_DATA_ROW + i
+            if r >= height - 1:
+                break
+            if thumb_at <= i < thumb_at + thumb_h:
+                safe_addstr(stdscr, r, bar_col, SCROLL_THUMB, attr_for("footer") | curses.A_BOLD)
+            else:
+                safe_addstr(stdscr, r, bar_col, SCROLL_TRACK, attr_for("idle"))
 
     # ghost row for the followed-but-vanished IP
     if ghost_active:

@@ -256,7 +256,7 @@ Always saves to `~/.config/nfsmon.conf`. `/etc/nfsmon.conf` is **never** overwri
 | ----------- | ------- | ------------------------------------------------------------------------ |
 | `HOST`      | on      | DNS name (reverse lookup), or IP when `Shift+i` is active                |
 | `NFSv`      | off     | Negotiated NFS version (`4.2`, `4.1`, ...) from `/proc/fs/nfsd/clients/*/info` |
-| `MOUNT`     | off     | Longest common path prefix of the client's mounted paths                 |
+| `MOUNT`     | off     | Export (or common path prefix) the client's open files belong to — see Known limitations |
 | `RTT`       | off     | TCP RTT (averaged over all active connections, in ms) from `ss -ti`      |
 | `CONNS`     | on      | Number of active TCP connections from this client                        |
 | `CONNECTED` | on      | How long the client has been continuously connected (`HH:MM:SS` or `Xd HH:MM:SS`) |
@@ -308,7 +308,8 @@ identifiable at the bottom.
 - `↑`/`↓`/`PgUp`/`PgDn`/`Home`/`End` (and vim-style `gg`/`Shift+g`) set
   `selected_ip`. The selection is marked with `A_REVERSE`.
 - When the list is longer than the screen, the view scrolls so the
-  selection stays visible, and the footer shows the displayed slice as
+  selection stays visible, a scrollbar in the last screen column shows
+  where you are, and the footer shows the displayed slice as
   `rows:12-40/87`. Without a cursor, `↓` starts at the top of the
   current view and `↑` at its bottom; the scroll position survives the
   cursor auto-hide.
@@ -687,9 +688,13 @@ Per-tick data sources:
    - Per client: `address: "<ip>:<port>"`, `minor version: <n>`
    - Yields the NFS version → `c["nfsv"]`
 
-3. **`/proc/fs/nfsd/clients/<id>/states`**
-   - Per client: all mounted paths (as `"…"` quoted strings)
-   - `nfsmon` extracts the longest common directory prefix → `c["mount"]`
+3. **`/proc/fs/nfsd/clients/<id>/states`** (+ `/proc/fs/nfsd/exports`)
+   - Per client: the open files, each with `filename: "…"` and
+     `superblock: "<maj>:<min>:<ino>"`
+   - Absolute filenames → longest common directory prefix → `c["mount"]`
+   - Otherwise (kernels that print only the last two path components,
+     e.g. RHEL 9) → the device of the open files is mapped onto the
+     export table; `fsid=0` pseudo-roots give way to their sub-exports
 
 4. **`socket.gethostbyaddr(ip)`** (in a daemon thread, cached)
    - Reverse DNS for `c["host"]`. On failure: shows the IP string.
@@ -752,6 +757,16 @@ UI loop (every 100 ms):
   TCP port 2049 (the standard NFSv4 port); v3 runs over
   rpcbind/portmap with dynamic ports and isn't picked up. Workaround:
   set `port` in the popup to the v3 port.
+- **MOUNT is an approximation.** NFSv4 has no mount protocol, so the
+  server never learns the path a client mounted. The column is derived
+  from the client's *open files* in `/proc/fs/nfsd/clients/*/states`.
+  Kernels that print absolute filenames yield the longest common
+  directory prefix; kernels that print only the last two path
+  components (RHEL 9's 5.14, mainline 6.x) yield the export whose
+  filesystem holds the open files, with `fsid=0` pseudo-roots dropped
+  in favour of their sub-exports. Several exports on one filesystem
+  collapse to their common prefix. A client without open files shows
+  an empty cell.
 - **`last_seen` / `seen_snapshot` grow unbounded.** One entry per IP
   ever seen. Practically harmless (KB range), but on servers with
   thousands of distinct IPs per day this might matter. A cleanup pass
