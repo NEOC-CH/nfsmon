@@ -81,6 +81,29 @@ class LayoutTest(unittest.TestCase):
         self.assertRegex(os.path.basename(p), r"^nfsmon_snapshot_\d{8}-\d{6}\.txt$")
 
 
+class HotkeySchemeTest(unittest.TestCase):
+    def test_sorting_is_shift_and_actions_are_not(self):
+        # KEY_MAP: uppercase letters only (Shift+letter), each a real sort key
+        for k, v in nfsmon.KEY_MAP.items():
+            self.assertTrue(k.isupper() and len(k) == 1, k)
+        self.assertEqual(set(nfsmon.KEY_MAP.values()) | {"activity", "spark"},
+                         {c[0] for c in nfsmon.COLUMNS} | {"ip", "activity", "spark"})
+        # help popup: every entry in the Sort section is Shift+letter (plus v),
+        # no entry outside it uses Shift+letter except the vim G jump
+        section = None
+        for key, desc in nfsmon.HELP_LINES:
+            if desc is None:
+                section = key
+                continue
+            k = key.strip()
+            if desc == "":
+                continue
+            if "Sort" in (section or ""):
+                self.assertTrue(k == "v" or k.startswith("Shift+"), (k, desc))
+            else:
+                self.assertFalse(k.startswith("Shift+"), (k, desc))
+
+
 class HostCellTest(unittest.TestCase):
     def test_dns_name_wins_then_client_name_then_ip(self):
         self.assertEqual(nfsmon.host_cell({"ip": "10.0.0.1", "host": "a.example", "client": "x"}), "a.example")
