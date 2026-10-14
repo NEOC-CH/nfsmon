@@ -125,7 +125,7 @@ Quit anytime with `q` or `Ctrl-C`.
 
 - **Title row** — port, current time, tick interval, program start time
 - **Spacer** — one blank line separating the title from the table
-- **Header row** — active columns in their on-screen order; HOST flips to IP when the `Shift+i` toggle is active
+- **Header row** — active columns in their on-screen order; HOST flips to IP when the `i` toggle is active
 - **Data rows** — one per live NFS client; each row color-coded by throughput tier (idle / low / medium / high / alert)
 - **Ghost rows** — only when `Show last-seen clients` is on: clients that were once connected but aren't anymore — always below the live rows
 - **Footer** — totals on the left (clients/conns/sent/recv, live clients only — ghost rows never count), status + hotkey hint on the right
@@ -145,28 +145,30 @@ Also reachable in the tool via `h`.
 
 ### Sort
 
+Every sort hotkey is **Shift + letter**; lowercase letters are actions.
+
 | Key       | Effect                                             |
 | --------- | -------------------------------------------------- |
-| `s`       | Sort by **SENT** (bytes total)                     |
-| `Shift+s` | Sort by **ΔSENT** (bytes since baseline)           |
-| `r`       | Sort by **RECV** (total)                           |
-| `Shift+r` | Sort by **ΔRECV**                                  |
-| `b`       | Sort by **B/s SENT** (live rate)                   |
-| `Shift+b` | Sort by **B/s RECV**                               |
-| `c`       | Sort by **CONNS**                                  |
-| `a`       | Sort by **CONNECTED** (connection age)             |
-| `Shift+a` | Sort by **ACTIVITY** (idle first)                  |
-| `i`       | Sort by **IP**                                     |
-| `Shift+h` | Sort by **HOST** (hostname)                        |
-| `n`       | Sort by **NFSv**                                   |
-| `m`       | Sort by **MOUNT**                                  |
-| `t`       | Sort by **RTT** (latency)                          |
-| `l`       | Sort by **SEEN** (last seen)                       |
+| `Shift+s` | Sort by **SENT** (bytes total)                     |
+| `Shift+x` | Sort by **ΔSENT** (bytes since baseline)           |
+| `Shift+b` | Sort by **B/s SENT** (live rate)                   |
+| `Shift+r` | Sort by **RECV** (total)                           |
+| `Shift+y` | Sort by **ΔRECV** (bytes since baseline)           |
+| `Shift+w` | Sort by **B/s RECV** (live rate — client writes)   |
+| `Shift+c` | Sort by **CONNS**                                  |
+| `Shift+a` | Sort by **CONNECTED** (connection age)             |
+| `Shift+v` | Sort by **ACTIVITY** (idle first)                  |
+| `Shift+i` | Sort by **IP**                                     |
+| `Shift+h` | Sort by **HOST** (DNS name)                        |
+| `Shift+p` | Sort by **CLIENT** (peer-reported name)            |
+| `Shift+n` | Sort by **NFSv**                                   |
+| `Shift+k` | Sort by **KERNEL** (client kernel release)         |
+| `Shift+m` | Sort by **MOUNT**                                  |
 | `Shift+o` | Sort by **OPEN** (open files)                      |
 | `Shift+l` | Sort by **LCK** (locks)                            |
-| `Shift+e` | Sort by **DLG** (delegations)                      |
-| `Shift+n` | Sort by **CLIENT** (client-reported name)          |
-| `Shift+k` | Sort by **KERNEL** (client kernel release)         |
+| `Shift+d` | Sort by **DLG** (delegations)                      |
+| `Shift+t` | Sort by **RTT** (latency)                          |
+| `Shift+z` | Sort by **SEEN** (last seen)                       |
 | `v`       | Toggle sort direction (↑/↓)                        |
 
 `TREND` (sparkline) intentionally has no hotkey — sparkline strings
@@ -186,14 +188,14 @@ aren't meaningfully comparable.
 | `Enter`         | Detail popup for the selected row; `↑`/`↓`/`PgUp`/`PgDn`/`Home`/`End`/wheel scroll it vertically, `←`/`→` horizontally, `Esc`/`q`/`Enter` close it |
 | `f`             | Follow mode (pin selection to an IP)       |
 | `g`             | Group by /24 subnet — applied 0.5 s after the key, or at once when another key follows (the delay is what tells `g` and `gg` apart) |
-| `Shift+i`       | HOST column: hostname ↔ IP toggle          |
+| `i`             | HOST column: hostname ↔ IP toggle          |
 
 ### Actions
 
 | Key        | Effect                                     |
 | ---------- | ------------------------------------------ |
 | `o`        | Open Options popup                         |
-| `Shift+d`  | Snapshot dump → `/tmp/nfsmon_snapshot_<time>.txt` |
+| `d`        | Snapshot dump → `/tmp/nfsmon_snapshot_<time>.txt` |
 | `space`    | Pause / resume the display                 |
 | `z`        | Baseline reset (zero Δ + connection age)   |
 
@@ -278,7 +280,7 @@ active theme stay in the theme file and are layered on at start-up.
 
 | Column      | Default | Content                                                                  |
 | ----------- | ------- | ------------------------------------------------------------------------ |
-| `HOST`      | on      | DNS name (reverse lookup), or IP when `Shift+i` is active. Without a DNS answer the name the client reported in its NFSv4 client id is shown as `~name` |
+| `HOST`      | on      | DNS name (reverse lookup), or IP when the `i` toggle is active. Without a DNS answer the name the client reported in its NFSv4 client id is shown as `~name` |
 | `CLIENT`    | off     | Hostname the client put into its NFSv4 client id (`name:` in `/proc/fs/nfsd/clients/*/info`, column id `client`) — independent of DNS |
 | `NFSv`      | off     | Negotiated NFS version (`4.2`, `4.1`, ...) from `/proc/fs/nfsd/clients/*/info` |
 | `KERNEL`    | off     | Client kernel release from `Implementation name:` (e.g. `6.8.0-142-generic`, column id `kernel`) — handy for spotting outdated clients |
@@ -304,7 +306,7 @@ active theme stay in the theme file and are layered on at start-up.
 
 - `sort_key` is the current sort key, `sort_rev` the direction.
 - Hotkeys set `sort_key` and `sort_rev=True` (descending).
-- `Shift+a` is the special case: `sort_key="activity"`, `sort_rev=False` — idle clients first.
+- `Shift+v` is the special case: `sort_key="activity"`, `sort_rev=False` — idle clients first.
 - `v` toggles only the direction (`sort_rev`), keeping the current key.
 - Footer shows the current sort as `sort:<key>↓` or `sort:<key>↑`.
 
@@ -385,9 +387,9 @@ Sorting: live rows are sorted by `sort_key`; ghost rows are *also*
 sorted by `sort_key` — but the ghost block always stays **below** the
 live block, regardless of direction.
 
-`l` is the direct hotkey for "Sort by SEEN".
+`Shift+z` is the direct hotkey for "Sort by SEEN".
 
-Ghost rows are display-only: the footer totals and the `Shift+d`
+Ghost rows are display-only: the footer totals and the `d`
 snapshot sum up live clients only, so `sent`/`recv` stay consistent
 with the `clients` count.
 
@@ -417,15 +419,15 @@ column appears in the bright variant of its role. Idle rows are lifted
 out of the dimmed tone into full intensity; color tiers move to their
 bright versions.
 
-Special case: when `Shift+i` is active (HOST column shows IP) and you
-sort by `i`/IP, the HOST column (which is currently displaying IP) is
+Special case: when the `i` toggle is active (HOST column shows IP) and you
+sort by `Shift+i`/IP, the HOST column (which is currently displaying IP) is
 treated as the "active sort column".
 
 ---
 
 ## Snapshot dumps
 
-`Shift+d` writes a plain-text dump of the currently visible view to
+`d` writes a plain-text dump of the currently visible view to
 `/tmp/nfsmon_snapshot_<YYYYmmdd-HHMMSS>.txt` — one file per press, so
 nothing gets overwritten. The content mirrors exactly what's on screen —
 same filter, same sort, same columns, same IP/HOST display. All rows and
@@ -501,7 +503,7 @@ nfsd:70thr  rpc:198/s  rd:0 B/s  wr:812.6 KB/s
 
 The two error fields switch the whole segment to the warning tier. When
 the title row is too narrow the segment moves to the spacer row below
-it. The `Shift+d` snapshot carries the same line in its header.
+it. The `d` snapshot carries the same line in its header.
 
 Not shown on purpose: the queue counters in `/proc/fs/nfsd/pool_stats`.
 On 5.14-era kernels `sockets-enqueued` is incremented for every request,
@@ -816,7 +818,7 @@ UI loop (every 100 ms):
 - `/var/log/nfsmon-events.log` writable (when watchdog is on). Default
   path is root-only too; redirect via `[watchdog] path` to e.g.
   `~/nfsmon-events.log`.
-- `/tmp/nfsmon_snapshot.txt` writable (for the `Shift+d` dump). The
+- `/tmp/nfsmon_snapshot_<time>.txt` writable (for the `d` dump). The
   standard `/tmp` is fine.
 - `~/.config/nfsmon/` writable (for persistent config).
 
@@ -872,7 +874,7 @@ UI loop (every 100 ms):
   cache. With slow DNS you'll briefly see IPs instead of hostnames
   until the daemon thread catches up. Failed lookups are retried every
   5 min, successful ones refreshed every hour.
-- **The `Shift+i` toggle affects only the HOST column, not the detail
+- **The `i` toggle affects only the HOST column, not the detail
   popup.** The detail popup always shows the IP plus the hostname (if
   known) — independent of the toggle.
 

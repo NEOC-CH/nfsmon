@@ -26,7 +26,7 @@ CSV_DEFAULT_PATH = "/var/log/nfsmon.csv"
 CSV_HEADER = ["timestamp", "ip", "host", "sent", "recv",
               "dsent", "drecv", "rate_sent", "rate_recv", "conns"]
 
-SNAPSHOT_DIR = "/tmp"    # Shift+d writes nfsmon_snapshot_<YYYYmmdd-HHMMSS>.txt here
+SNAPSHOT_DIR = "/tmp"    # d writes nfsmon_snapshot_<YYYYmmdd-HHMMSS>.txt here
 SNAPSHOT_TIMEOUT = 3.0   # seconds the footer flash-message stays visible
 
 CONFIG_SYSTEM = "/etc/nfsmon.conf"                            # system-wide defaults
@@ -792,15 +792,16 @@ def prune_seen(last_seen: Dict[str, float], seen_snapshot: Dict[str, Dict], cuto
 
 # ---------- curses UI -------------------------------------------------------
 
-KEY_MAP     = {"s": "sent",      "r": "recv",
-               "S": "dsent",     "R": "drecv",
-               "b": "rate_sent", "B": "rate_recv",
-               "c": "conns",     "a": "age",
-               "i": "ip",        "H": "host",
-               "n": "nfsv",      "m": "mount",
-               "t": "rtt_avg",   "l": "last_seen",
-               "O": "opens",     "L": "locks",     "E": "delegs",
-               "N": "client",    "K": "kernel"}
+# Every sort hotkey is Shift+<letter>; lowercase letters are actions.
+# ACTIVITY (idle first) is handled separately in main() because it sorts
+# ascending by default.
+KEY_MAP     = {"S": "sent",      "X": "dsent",     "B": "rate_sent",
+               "R": "recv",      "Y": "drecv",     "W": "rate_recv",
+               "C": "conns",     "A": "age",
+               "I": "ip",        "H": "host",      "P": "client",
+               "N": "nfsv",      "K": "kernel",    "M": "mount",
+               "O": "opens",     "L": "locks",     "D": "delegs",
+               "T": "rtt_avg",   "Z": "last_seen"}
 
 
 def elapsed_str(since: float) -> str:
@@ -939,27 +940,27 @@ TABS = [
 
 
 HELP_LINES = [
-    ("─── Sort ─────────────────────────────────", None),
-    ("  s",         "Sort by SENT (total)"),
-    ("  Shift+s",   "Sort by ΔSENT (delta)"),
-    ("  r",         "Sort by RECV (total)"),
-    ("  Shift+r",   "Sort by ΔRECV (delta)"),
-    ("  b",         "Sort by B/s SENT (live rate)"),
-    ("  Shift+b",   "Sort by B/s RECV (live rate)"),
-    ("  c",         "Sort by CONNS"),
-    ("  a",         "Sort by CONNECTED (age)"),
-    ("  Shift+a",   "Sort by ACTIVITY (idle first)"),
-    ("  i",         "Sort by IP"),
-    ("  Shift+h",   "Sort by HOST (hostname)"),
-    ("  n",         "Sort by NFSv"),
-    ("  m",         "Sort by MOUNT"),
-    ("  t",         "Sort by RTT (latency)"),
-    ("  l",         "Sort by SEEN (last seen)"),
-    ("  Shift+o",   "Sort by OPEN (open files)"),
-    ("  Shift+l",   "Sort by LCK (locks)"),
-    ("  Shift+e",   "Sort by DLG (delegations)"),
-    ("  Shift+n",   "Sort by CLIENT (client-reported name)"),
-    ("  Shift+k",   "Sort by KERNEL (client kernel)"),
+    ("─── Sort (all Shift+letter) ──────────────", None),
+    ("  Shift+s",   "SENT (total)"),
+    ("  Shift+x",   "ΔSENT (since baseline)"),
+    ("  Shift+b",   "B/s SENT (live rate)"),
+    ("  Shift+r",   "RECV (total)"),
+    ("  Shift+y",   "ΔRECV (since baseline)"),
+    ("  Shift+w",   "B/s RECV (live rate, client writes)"),
+    ("  Shift+c",   "CONNS"),
+    ("  Shift+a",   "CONNECTED (age)"),
+    ("  Shift+v",   "ACTIVITY (idle first)"),
+    ("  i",   "IP"),
+    ("  Shift+h",   "HOST (DNS name)"),
+    ("  Shift+p",   "CLIENT (peer-reported name)"),
+    ("  Shift+n",   "NFSv"),
+    ("  Shift+k",   "KERNEL (client kernel)"),
+    ("  Shift+m",   "MOUNT"),
+    ("  Shift+o",   "OPEN (open files)"),
+    ("  Shift+l",   "LCK (locks)"),
+    ("  d",   "DLG (delegations)"),
+    ("  Shift+t",   "RTT (latency)"),
+    ("  Shift+z",   "SEEN (last seen)"),
     ("  v",         "Toggle sort direction ↑↓"),
     ("─── View ─────────────────────────────────", None),
     ("  /",         "Filter by host or IP (substring)"),
@@ -971,10 +972,10 @@ HELP_LINES = [
     ("  Enter",     "Show detail (↑↓←→ scroll, Esc closes)"),
     ("  f",         "Follow selection (pin / unpin)"),
     ("  g",         "Group by /24 subnet (gg jumps to top)"),
-    ("  Shift+i",   "Toggle host column: hostname ↔ IP"),
+    ("  i",         "Toggle host column: hostname ↔ IP"),
     ("─── Actions ──────────────────────────────", None),
     ("  o",         "Open Options popup"),
-    ("  Shift+d",   f"Snapshot dump → {SNAPSHOT_DIR}/nfsmon_snapshot_<time>.txt"),
+    ("  d",         f"Snapshot dump → {SNAPSHOT_DIR}/nfsmon_snapshot_<time>.txt"),
     ("  space",     "Pause / resume display"),
     ("  z",         "Reset baseline (zero Δ + age + since)"),
     ("─── General ──────────────────────────────", None),
@@ -1507,7 +1508,7 @@ def aggregate_by_subnet(conns: List[Dict]) -> List[Dict]:
 
 
 def snapshot_path(ts: Optional[float] = None) -> str:
-    # One file per dump so consecutive Shift+d presses don't overwrite.
+    # One file per dump so consecutive d presses don't overwrite.
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(ts))
     return os.path.join(SNAPSHOT_DIR, f"nfsmon_snapshot_{stamp}.txt")
 
@@ -1960,7 +1961,7 @@ def main(stdscr) -> None:
     filter_input_active = False
     filter_saved        = ""   # snapshot to restore on Esc
     group_subnet        = cfg.get("group_subnet", False)
-    show_ip_in_host     = cfg.get("show_ip", False)   # Shift+i toggles HOST col → IP
+    show_ip_in_host     = cfg.get("show_ip", False)   # i toggles HOST col → IP
     paused              = False
     frozen_conns        = None # snapshot taken at pause; None = follow live
     selected_ip         = None # currently highlighted row (by IP)
@@ -2600,7 +2601,7 @@ def main(stdscr) -> None:
                     _select_index(0)
                 else:
                     pending_g = now
-            elif key == ord("I"):
+            elif key == ord("i"):
                 # Toggle the host column between hostname (DNS) and raw IP;
                 # column header swaps "HOST" ↔ "IP" accordingly. The standalone
                 # IP column was removed in favour of this toggle.
@@ -2668,7 +2669,7 @@ def main(stdscr) -> None:
                 detail_y = detail_x = 0
                 selected_ip = target
                 break                                                  # popup opened; stop draining
-            elif key == ord("A"):
+            elif key == ord("V"):                      # ACTIVITY, idle first
                 sort_key  = "activity"
                 sort_rev  = False                  # idle first
                 show_help = False
@@ -2678,7 +2679,7 @@ def main(stdscr) -> None:
                 show_help = False
             elif key == ord("v"):
                 sort_rev = not sort_rev
-            elif key == ord("D"):
+            elif key == ord("d"):
                 # Snapshot dump: write the current visible view as plain
                 # text. Footer flashes a confirmation/error for
                 # SNAPSHOT_TIMEOUT seconds.

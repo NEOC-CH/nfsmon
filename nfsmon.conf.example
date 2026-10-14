@@ -20,7 +20,7 @@
 # Aggregate clients by /24 subnet (true/false).
 # group_subnet = false
 
-# Show IP instead of hostname in the HOST column on startup. The Shift+i
+# Show IP instead of hostname in the HOST column on startup. The i
 # hotkey toggles this at runtime; the saved value is the last-seen state.
 # show_ip = false
 
