@@ -1,4 +1,6 @@
 """Pure helpers behind the rendering: totals, page size, DNS cache, health."""
+import contextlib
+import io
 import os
 import socket
 import sys
@@ -50,8 +52,40 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(nfsmon.data_rows(12, True), 12 - rows_above - 2)
         self.assertEqual(nfsmon.data_rows(3, True), 1)   # never below one row
 
-    def test_help_popup_fits_fixed_box(self):
-        self.assertLessEqual(len(nfsmon.HELP_LINES), 38)
+    def test_popup_box_and_help_scroll_range(self):
+        self.assertEqual(nfsmon.popup_box_dims(50, 120), (40, 70))
+        self.assertEqual(nfsmon.popup_box_dims(12, 60), (10, 56))
+        # 12 rows -> 10-row box -> 8 content rows
+        self.assertEqual(nfsmon.help_max_scroll(12, 100), max(0, len(nfsmon.HELP_LINES) - 8))
+        self.assertEqual(nfsmon.help_max_scroll(500, 100), max(0, len(nfsmon.HELP_LINES) - 38))
+
+    def test_states_cell(self):
+        self.assertEqual(nfsmon.states_str(None), "")
+        self.assertEqual(nfsmon.states_str((0, 0, 0)), "")
+        self.assertEqual(nfsmon.states_str((12, 3, 5)), "  12   3   5")
+
+    def test_subnet_grouping_sums_states(self):
+        rows = [row("10.0.10.1", 1, 1, 1, states=3, states_detail=(2, 1, 0)),
+                row("10.0.10.2", 1, 1, 1, states=5, states_detail=(4, 0, 1)),
+                row("10.0.20.9", 1, 1, 1, states=7, states_detail=(7, 0, 0))]
+        groups = {g["ip"]: g for g in nfsmon.aggregate_by_subnet(rows)}
+        self.assertEqual(groups["10.0.10.0/24"]["states"], 8)
+        self.assertEqual(groups["10.0.10.0/24"]["states_detail"], (6, 1, 1))
+        self.assertEqual(groups["10.0.20.0/24"]["states_detail"], (7, 0, 0))
+
+    def test_snapshot_path_is_timestamped(self):
+        p = nfsmon.snapshot_path(0)
+        self.assertTrue(p.startswith(nfsmon.SNAPSHOT_DIR + "/nfsmon_snapshot_"), p)
+        self.assertRegex(os.path.basename(p), r"^nfsmon_snapshot_\d{8}-\d{6}\.txt$")
+
+
+class CliTest(unittest.TestCase):
+    def test_overrides_parse_and_validate(self):
+        a = nfsmon._parse_args(["--port", "20049", "--interval", "5", "--config", "/tmp/x.conf"])
+        self.assertEqual((a.port, a.interval, a.config), (20049, 5, "/tmp/x.conf"))
+        self.assertEqual(nfsmon._parse_args([]).port, None)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            nfsmon._parse_args(["--port", "70000"])
 
 
 class DnsCacheTest(unittest.TestCase):

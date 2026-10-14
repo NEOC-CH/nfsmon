@@ -5,7 +5,7 @@ connected client, live: total bytes + delta since start, B/s rates,
 connection count, connection age, NFS version, mounted path, TCP RTT,
 sparkline trend, and how long ago a client was last seen. Includes
 filtering, sorting, pause, follow, /24 subnet aggregation, CSV logging,
-alerts, watchdog (disconnect logging), themes (8-color base + 256-color
+alerts, watchdog (connect/disconnect/alert logging), themes (8-color base + 256-color
 aliases), and persistent configuration.
 
 ```
@@ -37,7 +37,7 @@ NFS Traffic  port:2049  14:32:07  interval:2s  since:09:14:11  (05:17:56)
 - [Snapshot dumps](#snapshot-dumps)
 - [CSV logging](#csv-logging)
 - [Alerts](#alerts)
-- [Watchdog (disconnect logging)](#watchdog-disconnect-logging)
+- [Watchdog (event logging)](#watchdog-event-logging)
 - [Configurable TREND length](#configurable-trend-length)
 - [Themes and colors](#themes-and-colors)
 - [Configuration files](#configuration-files)
@@ -91,11 +91,17 @@ can still be selected from the popup as soon as files exist in
 ## Usage
 
 ```bash
-sudo nfsmon                # start the tool (curses TUI)
-nfsmon --version           # print version + author and exit
-nfsmon -V                  # short form
-nfsmon --help              # argparse help
+sudo nfsmon                        # start the tool (curses TUI)
+sudo nfsmon --port 20049           # watch another port for this run (e.g. NFSv3)
+sudo nfsmon --interval 1           # tick every second for this run
+sudo nfsmon --config ./lab.conf    # read + save this user config instead of ~/.config/nfsmon.conf
+nfsmon --version                   # print version + author and exit (-V)
+nfsmon --help                      # argparse help
 ```
+
+`--port` and `--interval` override the config files for this run only;
+they become persistent if you then press **[Save Settings]** in the
+Options popup.
 
 Quit anytime with `q` or `Ctrl-C`.
 
@@ -155,6 +161,7 @@ Also reachable in the tool via `h`.
 | `m`       | Sort by **MOUNT**                                  |
 | `t`       | Sort by **RTT** (latency)                          |
 | `l`       | Sort by **SEEN** (last seen)                       |
+| `Shift+o` | Sort by **OPEN** (open files + locks + delegations) |
 | `v`       | Toggle sort direction (↑/↓)                        |
 
 `TREND` (sparkline) intentionally has no hotkey — sparkline strings
@@ -169,6 +176,8 @@ aren't meaningfully comparable.
 | `PgUp` / `PgDn` | Move selection ±10 rows                    |
 | `Home` / `End`  | Jump to the first / last row               |
 | `gg` / `Shift+g`| Jump to the first / last row (vim style)   |
+| `←` / `→`       | Scroll columns horizontally; the first column stays pinned, `‹`/`›` in the header mark hidden columns |
+| Mouse           | Wheel moves the cursor 3 rows, left click selects a row (toggle in `[defaults]`) |
 | `Enter`         | Detail popup for the selected row          |
 | `f`             | Follow mode (pin selection to an IP)       |
 | `g`             | Group by /24 subnet — applied 0.5 s after the key, or at once when another key follows (the delay is what tells `g` and `gg` apart) |
@@ -179,7 +188,7 @@ aren't meaningfully comparable.
 | Key        | Effect                                     |
 | ---------- | ------------------------------------------ |
 | `o`        | Open Options popup                         |
-| `Shift+d`  | Snapshot dump → `/tmp/nfsmon_snapshot.txt` |
+| `Shift+d`  | Snapshot dump → `/tmp/nfsmon_snapshot_<time>.txt` |
 | `space`    | Pause / resume the display                 |
 | `z`        | Baseline reset (zero Δ + connection age)   |
 
@@ -212,7 +221,8 @@ rows, `space` toggles/activates, `Tab` jumps to the
 │  Theme:  ‹ default ›  (space to cycle)                             │
 │  Bright sorted column:  [x]                                        │
 │  Show last-seen clients:  [ ]                                      │
-│  Watchdog (log disconnects):  [ ]  /var/log/nfsmon-events.log      │
+│  Watchdog (log events):  [ ]  /var/log/nfsmon-events.log           │
+│  Mouse (wheel scrolls, click selects):  [x]                        │
 │  TREND length:  [10]  (10-40)                                      │
 │                                                                    │
 │ Tab:save  ←→:tabs  ↑↓:sel  space:toggle  Esc:close   [Save Settings]│
@@ -231,7 +241,8 @@ Per-program settings:
 - **Theme** — active theme. `space` cycles through `(default)` + every file in `~/.config/nfsmon/colors/`. The change is visible immediately.
 - **Bright sorted column** — toggle. The active sort column is rendered in its bright variant (A_BOLD, A_DIM stripped).
 - **Show last-seen clients** — toggle. Previously-seen clients show up below the live ones as ghost rows.
-- **Watchdog (log disconnects)** — toggle. Writes one CSV line per disconnect event to `/var/log/nfsmon-events.log` (or the configured path). Path comes from `[watchdog] path` in the config.
+- **Watchdog (log events)** — toggle. Writes one CSV line per connect / reconnect / disconnect / alert / alert_clear event to `/var/log/nfsmon-events.log` (or the configured path). Path comes from `[watchdog] path` in the config.
+- **Mouse** — toggle. Wheel moves the cursor by 3 rows, a left click selects the row under the pointer. Off: the terminal's own mouse handling (text selection) is untouched.
 - **TREND length** — numeric edit (10-40). Controls both the column width of the TREND column and the length of the per-IP sample buffer (`rate_history`). Default 10, max 40 — values out of range are clamped to the default at startup.
 
 ### Tab `[columns]`
@@ -261,6 +272,7 @@ active theme stay in the theme file and are layered on at start-up.
 | `HOST`      | on      | DNS name (reverse lookup), or IP when `Shift+i` is active                |
 | `NFSv`      | off     | Negotiated NFS version (`4.2`, `4.1`, ...) from `/proc/fs/nfsd/clients/*/info` |
 | `MOUNT`     | off     | Export (or common path prefix) the client's open files belong to — see Known limitations |
+| `OPEN LCK DLG` | off  | Open files / locks / delegations the client currently holds, from `/proc/fs/nfsd/clients/*/states` (column id `states`) |
 | `RTT`       | off     | TCP RTT (averaged over all active connections, in ms) from `ss -ti`      |
 | `CONNS`     | on      | Number of active TCP connections from this client                        |
 | `CONNECTED` | on      | How long the client has been continuously connected (`HH:MM:SS` or `Xd HH:MM:SS`) |
@@ -314,7 +326,8 @@ identifiable at the bottom.
 - When the list is longer than the screen, the view scrolls so the
   selection stays visible, a scrollbar in the last screen column shows
   where you are, and the footer shows the displayed slice as
-  `rows:12-40/87`. Without a cursor, `↓` starts at the top of the
+  `rows:12-40/87`. The mouse wheel moves the cursor by 3 rows, a left
+  click selects the row under the pointer. Without a cursor, `↓` starts at the top of the
   current view and `↑` at its bottom; the scroll position survives the
   cursor auto-hide.
 - The selection auto-hides after 5 s of no input (except in follow
@@ -394,9 +407,11 @@ treated as the "active sort column".
 ## Snapshot dumps
 
 `Shift+d` writes a plain-text dump of the currently visible view to
-`/tmp/nfsmon_snapshot.txt`. The content mirrors exactly what's on
-screen — same filter, same sort, same columns, same IP/HOST display.
-All rows are written, not only the slice currently scrolled into view.
+`/tmp/nfsmon_snapshot_<YYYYmmdd-HHMMSS>.txt` — one file per press, so
+nothing gets overwritten. The content mirrors exactly what's on screen —
+same filter, same sort, same columns, same IP/HOST display. All rows and
+all active columns are written, not only the slice currently scrolled
+into view.
 
 Use case: pinning the current state without taking a screenshot, e.g.
 to attach to tickets, emails, bug reports. The footer flashes a
@@ -446,34 +461,40 @@ and persisted via the config (`[alerts]` section: `threshold_mb`,
 
 ---
 
-## Watchdog (disconnect logging)
+## Watchdog (event logging)
 
-Toggle: `o` → `[defaults]` → `Watchdog (log disconnects)` → `space`. Default: off.
+Toggle: `o` → `[defaults]` → `Watchdog (log events)` → `space`. Default: off.
 
-When on, every **disconnect** is written as a CSV line into an event
-log file (default `/var/log/nfsmon-events.log`, path configurable via
+When on, client transitions are written as CSV lines into an event log
+file (default `/var/log/nfsmon-events.log`, path configurable via
 `[watchdog] path`). Format:
 
 ```csv
 timestamp,event,ip,host,last_sent,last_recv
 2026-05-05T14:32:07,disconnect,10.0.10.42,vp-app-01.xxx.tld,4523846542,1284567890
+2026-05-05T14:33:12,reconnect,10.0.10.42,vp-app-01.xxx.tld,4523846542,1284567890
+2026-05-05T14:40:01,alert,10.0.10.17,vp-batch-03.xxx.tld,9912345678,1200000
+2026-05-05T14:41:09,alert_clear,10.0.10.17,vp-batch-03.xxx.tld,9998765432,1300000
 ```
 
-**Detection**: each tick, *before* the stale-IP cleanup, the tick block
-computes `set(first_seen.keys()) - active_ips`. IPs that were live in
-the previous tick and aren't anymore → disconnect. One row per IP;
-host + last_sent + last_recv come from `seen_snapshot` (what the
-previous tick stored).
+| event | when | last_sent / last_recv |
+| --- | --- | --- |
+| `disconnect` | IP was live in the previous tick and is gone now | totals from the last tick it was seen |
+| `connect` | IP is new this tick and was never seen before | totals at this tick |
+| `reconnect` | IP is new this tick and was last seen ≤ 300 s ago | totals at this tick |
+| `alert` | activity stayed above the alert threshold for the alert duration | totals at this tick |
+| `alert_clear` | activity dropped below the threshold again | totals at this tick |
+
+**Detection**: each tick, *before* the stale-IP cleanup, the live set of
+the previous tick is compared with the current one. The very first tick
+only populates the live set and logs nothing, so a (re)start does not
+produce a burst of `connect` rows.
 
 **Intentional limitations**:
-- Disconnects only, no reconnects. If you need the inverse (e.g.
-  "IP X was gone for Y seconds and is back"), it's available via
-  cross-reference between `last_seen` (timestamp in seen_snapshot)
-  and the current live list — reconnect detection would be a
-  ~10-line addition.
-- No "flap filter". If a client bounces every tick, every disappearance
-  writes a separate line. If needed: add a threshold/suppression
-  layer.
+- No "flap filter". If a client bounces every tick, every transition
+  writes a separate line (`disconnect`, `reconnect`, ...). If needed:
+  add a threshold/suppression layer.
+- The reconnect window (300 s) is a constant, not a config key.
 
 **Toggle semantics**:
 - Toggle-off closes the file handle.
@@ -487,7 +508,7 @@ previous tick stored).
 ```bash
 # Top 10 hosts by number of disconnects in the last 24 h
 awk -F, -v cutoff="$(date -d '24 hours ago' -u +%Y-%m-%dT%H:%M:%S)" \
-    '$1 > cutoff {print $4}' /var/log/nfsmon-events.log \
+    '$1 > cutoff && $2 == "disconnect" {print $4}' /var/log/nfsmon-events.log \
     | sort | uniq -c | sort -rn | head
 ```
 

@@ -26,7 +26,7 @@ CSV_DEFAULT_PATH = "/var/log/nfsmon.csv"
 CSV_HEADER = ["timestamp", "ip", "host", "sent", "recv",
               "dsent", "drecv", "rate_sent", "rate_recv", "conns"]
 
-SNAPSHOT_PATH = "/tmp/nfsmon_snapshot.txt"
+SNAPSHOT_DIR = "/tmp"    # Shift+d writes nfsmon_snapshot_<YYYYmmdd-HHMMSS>.txt here
 SNAPSHOT_TIMEOUT = 3.0   # seconds the footer flash-message stays visible
 
 CONFIG_SYSTEM = "/etc/nfsmon.conf"                            # system-wide defaults
@@ -38,6 +38,13 @@ ALERT_DEFAULT_DUR = 5     # default alert duration in seconds (above threshold)
 
 WATCHDOG_DEFAULT_PATH = "/var/log/nfsmon-events.log"
 WATCHDOG_HEADER = ["timestamp", "event", "ip", "host", "last_sent", "last_recv"]
+WATCHDOG_RECONNECT_SEC = 300   # a client back within this window logs "reconnect", else "connect"
+
+MOUSE_STEP       = 3           # rows per mouse-wheel notch
+MOUSE_WHEEL_UP   = getattr(curses, "BUTTON4_PRESSED", 0x10000)
+MOUSE_WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", 0x200000)   # BUTTON5_* needs Python >= 3.10
+
+CLI_OVERRIDES: Dict[str, int] = {}   # --port / --interval from argparse, applied over the config
 
 DNS_TTL_OK   = 3600   # seconds a successful reverse lookup is cached
 DNS_TTL_FAIL = 300    # seconds before a failed reverse lookup is retried
@@ -230,7 +237,8 @@ def load_config() -> Dict:
                       ("bright_sort_col", "bool"),
                       ("show_seen_clients", "bool"),
                       ("watchdog_enabled", "bool"),
-                      ("spark_len", "int")):
+                      ("spark_len", "int"),
+                      ("mouse", "bool")):
         v = _opt("general", key, kind)
         if v is not None:
             out[key] = v
@@ -282,7 +290,8 @@ def save_config(interval: int, port: int, group_subnet: bool,
                 show_seen_clients: bool = False,
                 watchdog_enabled: bool = False,
                 watchdog_path: str = WATCHDOG_DEFAULT_PATH,
-                spark_len: int = SPARK_LEN) -> bool:
+                spark_len: int = SPARK_LEN,
+                mouse: bool = True) -> bool:
     # Always writes to CONFIG_USER. System config CONFIG_SYSTEM stays
     # untouched. Creates the parent dir if needed. Returns True on success,
     # False on OSError. theme is a theme filename (without .conf) or "" for
@@ -300,6 +309,7 @@ def save_config(interval: int, port: int, group_subnet: bool,
         "show_seen_clients": "true" if show_seen_clients else "false",
         "watchdog_enabled":  "true" if watchdog_enabled else "false",
         "spark_len":         str(spark_len),
+        "mouse":             "true" if mouse else "false",
     }
     cp["csv"] = {
         "enabled": "true" if csv_enabled else "false",
@@ -580,7 +590,7 @@ def _mount_from_exports(devs: Set[Tuple[int, int]],
     return prefix if prefix not in ("", "/") else ",".join(cands)
 
 
-def read_nfsd_clients_info(need_mount: bool = True) -> Dict[str, Dict[str, str]]:
+def read_nfsd_clients_info(need_states: bool = True) -> Dict[str, Dict]:
     # Parse /proc/fs/nfsd/clients/<id>/{info,states} per peer. Cheap small
     # reads (~30 files even on a busy server). Returns ip -> {"nfsv": "4.2",
     # "mount": "/opt/exports/nfs-home"}. mount is derived from the client's
@@ -591,8 +601,10 @@ def read_nfsd_clients_info(need_mount: bool = True) -> Dict[str, Dict[str, str]]
     #     5.14, mainline 6.x) -> the superblock "maj:min" of the open files
     #     mapped onto the export table (see _mount_from_exports).
     # Empty if the client has no open state or nothing can be mapped.
-    # need_mount=False skips the (comparatively large) states files when
-    # neither the MOUNT column nor a mount sort needs them.
+    # "states" is (opens, locks, delegations) counted from the same file,
+    # or None when it was not read. need_states=False skips the
+    # (comparatively large) states files when neither MOUNT nor OPEN is
+    # visible or the sort key.
     result: Dict[str, Dict[str, str]] = {}
     base = NFSD_CLIENTS_DIR
     if not os.path.isdir(base):
@@ -632,13 +644,16 @@ def read_nfsd_clients_info(need_mount: bool = True) -> Dict[str, Dict[str, str]]
                     version = f"4.{v}"
         mount  = ""
         states = ""
-        if need_mount:
+        detail: Optional[Tuple[int, int, int]] = None
+        if need_states:
             try:
                 with open(states_path) as f:
                     states = f.read()
             except OSError:
                 pass
         if states:
+            kinds  = re.findall(r"type: (\w+)", states)
+            detail = (kinds.count("open"), kinds.count("lock"), kinds.count("deleg"))
             # A bare "/" (an open directory handle on the fs root) carries no
             # information and would collapse the common prefix, so skip it.
             paths = [p for p in re.findall(r'"(/[^"]+)"', states) if p != "/"]
@@ -652,7 +667,7 @@ def read_nfsd_clients_info(need_mount: bool = True) -> Dict[str, Dict[str, str]]
                         export_devs = _export_devices()
                     mount = _mount_from_exports(devs, export_devs)
         if ip:
-            result[ip] = {"nfsv": version or "", "mount": mount}
+            result[ip] = {"nfsv": version or "", "mount": mount, "states": detail}
     if denied and not result:
         _set_health("nfsd", f"no access to {base}/*/info (run as root)")
     else:
@@ -662,15 +677,14 @@ def read_nfsd_clients_info(need_mount: bool = True) -> Dict[str, Dict[str, str]]
 
 # ---------- curses UI -------------------------------------------------------
 
-SORT_CYCLE = ["sent", "recv", "dsent", "drecv", "rate_sent", "rate_recv",
-              "activity", "conns", "age", "ip", "host"]
 KEY_MAP     = {"s": "sent",      "r": "recv",
                "S": "dsent",     "R": "drecv",
                "b": "rate_sent", "B": "rate_recv",
                "c": "conns",     "a": "age",
                "i": "ip",        "H": "host",
                "n": "nfsv",      "m": "mount",
-               "t": "rtt_avg",   "l": "last_seen"}
+               "t": "rtt_avg",   "l": "last_seen",
+               "O": "states"}
 
 
 def elapsed_str(since: float) -> str:
@@ -704,6 +718,15 @@ def last_seen_str(ts: float) -> str:
     return f"{d}d {h}h" if d < 10 else f"{d}d"
 
 
+def states_str(detail) -> str:
+    # (opens, locks, delegations) from /proc/fs/nfsd/clients/*/states as a
+    # fixed-width cell; empty when nothing is held or the file wasn't read.
+    if not detail or not any(detail):
+        return ""
+    o, l, d = detail
+    return f"{o:>4} {l:>3} {d:>3}"
+
+
 # Column definitions drive the table header and data rows. Each entry is
 # (id, label, width, align, value_fn). cols_visible[id] gates whether the
 # column is rendered; the order in COLUMNS is the on-screen order.
@@ -711,6 +734,7 @@ COLUMNS = [
     ("host",      "HOST",      30, "<", lambda c: c["host"]),
     ("nfsv",      "NFSv",       4, "<", lambda c: c.get("nfsv", "")),
     ("mount",     "MOUNT",     24, "<", lambda c: c.get("mount", "")),
+    ("states",    "OPEN LCK DLG", 12, ">", lambda c: states_str(c.get("states_detail"))),
     ("rtt_avg",   "RTT",        9, ">", lambda c: (f"{c['rtt_avg']:.1f} ms" if c.get("rtt_avg", 0) > 0 else "")),
     ("conns",     "CONNS",      6, ">", lambda c: str(c["conns"])),
     ("age",       "CONNECTED", 11, ">", lambda c: elapsed_str(c["age"])),
@@ -773,7 +797,8 @@ TABS = [
         ("theme",     "theme",            "Theme"),
         ("bright",    "bright_sort_col",  "Bright sorted column"),
         ("seen",      "show_seen_clients", "Show last-seen clients"),
-        ("watchdog",  "watchdog_enabled", "Watchdog (log disconnects)"),
+        ("watchdog",  "watchdog_enabled", "Watchdog (log events)"),
+        ("mouse",     "mouse",            "Mouse (wheel scrolls, click selects)"),
         ("spark_len", "spark_len",        "TREND length"),
     ]),
     ("columns",  "columns",
@@ -802,19 +827,22 @@ HELP_LINES = [
     ("  m",         "Sort by MOUNT"),
     ("  t",         "Sort by RTT (latency)"),
     ("  l",         "Sort by SEEN (last seen)"),
+    ("  Shift+o",   "Sort by OPEN (open files / locks / delegs)"),
     ("  v",         "Toggle sort direction ↑↓"),
     ("─── View ─────────────────────────────────", None),
     ("  /",         "Filter by host or IP (substring)"),
     ("  ↑/↓",       "Select row (view scrolls along)"),
     ("  PgUp/PgDn", "Select ±10 rows"),
     ("  Home/End",  "Jump to first / last row (vim: gg / G)"),
+    ("  ←/→",       "Scroll columns (first column stays)"),
+    ("  Mouse",     "Wheel scrolls 3 rows, click selects"),
     ("  Enter",     "Show detail (selected row)"),
     ("  f",         "Follow selection (pin / unpin)"),
     ("  g",         "Group by /24 subnet (gg jumps to top)"),
     ("  Shift+i",   "Toggle host column: hostname ↔ IP"),
     ("─── Actions ──────────────────────────────", None),
     ("  o",         "Open Options popup"),
-    ("  Shift+d",   f"Snapshot dump → {SNAPSHOT_PATH}"),
+    ("  Shift+d",   f"Snapshot dump → {SNAPSHOT_DIR}/nfsmon_snapshot_<time>.txt"),
     ("  space",     "Pause / resume display"),
     ("  z",         "Reset baseline (zero Δ + age + since)"),
     ("─── General ──────────────────────────────", None),
@@ -836,13 +864,22 @@ def safe_addstr(stdscr, row: int, col: int, text: str, attr: int = 0) -> None:
         pass
 
 
-def draw_help_popup(stdscr) -> None:
+def popup_box_dims(height: int, width: int) -> Tuple[int, int]:
+    # Fixed footprint shared by the help and Options popups (70×40, clamped
+    # to the terminal) so switching between them doesn't make the screen
+    # jump. main() uses it to clamp the help scroll offset.
+    return min(40, max(8, height - 2)), min(70, max(20, width - 4))
+
+
+def help_max_scroll(height: int, width: int) -> int:
+    # HELP_LINES beyond the box scroll with ↑/↓, PgUp/PgDn, Home/End, wheel.
+    box_h, _ = popup_box_dims(height, width)
+    return max(0, len(HELP_LINES) - (box_h - 2))
+
+
+def draw_help_popup(stdscr, scroll: int = 0) -> None:
     height, width = stdscr.getmaxyx()
-    # Same fixed footprint as the Options popup (70×40, clamped to terminal)
-    # so help and options have a consistent visual size and don't make the
-    # screen jump when switching between them.
-    box_h = min(40, max(8,  height - 2))
-    box_w = min(70, max(20, width  - 4))
+    box_h, box_w = popup_box_dims(height, width)
     row0  = max(0, (height - box_h) // 2)
     col0  = max(0, (width  - box_w) // 2)
     inner = box_w - 2
@@ -874,7 +911,8 @@ def draw_help_popup(stdscr) -> None:
 
     # content rows (HELP_LINES) — overlay on the painted background
     last_content = row0 + box_h - 2   # last writable row above bottom border
-    for idx, (left, right) in enumerate(HELP_LINES):
+    scroll = max(0, min(scroll, help_max_scroll(height, width)))
+    for idx, (left, right) in enumerate(HELP_LINES[scroll:]):
         r = row0 + 1 + idx
         if r > last_content or r >= height:
             break
@@ -892,11 +930,17 @@ def draw_help_popup(stdscr) -> None:
             if desc_max > 0:
                 safe_addstr(stdscr, r, desc_col, right[:desc_max], C_TEXT)
 
-    # bottom border
+    # bottom border — carries the scroll position when the list overflows
     bottom_row = row0 + box_h - 1
     if bottom_row < height:
-        safe_addstr(stdscr, bottom_row, col0,
-                    "└" + "─" * inner + "┘", C_BOX)
+        if help_max_scroll(height, width) > 0:
+            shown  = min(len(HELP_LINES), scroll + box_h - 2)
+            tag    = f" ↑↓ PgUp/PgDn scroll  {scroll + 1}-{shown}/{len(HELP_LINES)} "[:inner]
+            pad    = inner - len(tag)
+            bottom = "└" + "─" * (pad // 2) + tag + "─" * (pad - pad // 2) + "┘"
+        else:
+            bottom = "└" + "─" * inner + "┘"
+        safe_addstr(stdscr, bottom_row, col0, bottom, C_BOX)
 
 
 def draw_columns_popup(stdscr, cols_visible: Dict[str, bool],
@@ -915,13 +959,13 @@ def draw_columns_popup(stdscr, cols_visible: Dict[str, bool],
                        show_seen_clients: bool = False,
                        watchdog_enabled: bool = False,
                        watchdog_path: str = "",
-                       spark_len: int = SPARK_LEN) -> None:
+                       spark_len: int = SPARK_LEN,
+                       mouse_enabled: bool = True) -> None:
     height, width = stdscr.getmaxyx()
     # Fixed target size (70×40, W×H) clamped to terminal so the popup never
     # changes size between tabs. Width was bumped from 60 to 70 to fit the
     # [Save Settings] button at the bottom-right next to the hint text.
-    box_h = min(40, max(8,  height - 2))
-    box_w = min(70, max(20, width  - 4))
+    box_h, box_w = popup_box_dims(height, width)
     row0  = max(0, (height - box_h) // 2)
     col0  = max(0, (width  - box_w) // 2)
     inner = box_w - 2
@@ -1061,6 +1105,12 @@ def draw_columns_popup(stdscr, cols_visible: Dict[str, bool],
             label = item[2]
             mark  = "[x]" if watchdog_enabled else "[ ]"
             text  = f" {label}:  {mark}  {watchdog_path}".ljust(inner)[:inner]
+            attr  = C_TEXT | (curses.A_REVERSE if idx == sel_idx else 0)
+            safe_addstr(stdscr, r, col0 + 1, text, attr)
+        elif kind == "mouse":
+            label = item[2]
+            mark  = "[x]" if mouse_enabled else "[ ]"
+            text  = f" {label}:  {mark}".ljust(inner)[:inner]
             attr  = C_TEXT | (curses.A_REVERSE if idx == sel_idx else 0)
             safe_addstr(stdscr, r, col0 + 1, text, attr)
         elif kind == "spark_len":
@@ -1227,9 +1277,13 @@ def aggregate_by_subnet(conns: List[Dict]) -> List[Dict]:
                 # cells) so every sort_key remains usable while grouped
                 # instead of raising KeyError in compute_visible.
                 "nfsv": "", "mount": "", "spark": "", "last_seen": 0.0,
+                "states": 0, "states_detail": (0, 0, 0),
             }
             groups[subnet] = g
         g["conns"] += c["conns"]
+        g["states"] += c.get("states", 0)
+        g["states_detail"] = tuple(a + b for a, b in
+                                   zip(g["states_detail"], c.get("states_detail") or (0, 0, 0)))
         g["sent"]  += c["sent"]
         g["recv"]  += c["recv"]
         g["dsent"] += c["dsent"]
@@ -1240,6 +1294,21 @@ def aggregate_by_subnet(conns: List[Dict]) -> List[Dict]:
         if c["age"] < g["age"]:
             g["age"] = c["age"]
     return list(groups.values())
+
+
+def snapshot_path(ts: Optional[float] = None) -> str:
+    # One file per dump so consecutive Shift+d presses don't overwrite.
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(ts))
+    return os.path.join(SNAPSHOT_DIR, f"nfsmon_snapshot_{stamp}.txt")
+
+
+def _apply_mouse(enabled: bool) -> None:
+    # Mouse reporting on/off at runtime; terminals without mouse support
+    # just never deliver KEY_MOUSE. Shift+drag keeps native text selection.
+    try:
+        curses.mousemask(curses.ALL_MOUSE_EVENTS if enabled else 0)
+    except curses.error:
+        pass
 
 
 def _live_rows(visible: List[Dict]) -> List[Dict]:
@@ -1337,7 +1406,10 @@ def draw(stdscr, visible: List[Dict], total_count: int,
          watchdog_enabled: bool = False,
          watchdog_path: str = "",
          spark_len: int = SPARK_LEN,
-         scroll_top: int = 0) -> None:
+         scroll_top: int = 0,
+         col_offset: int = 0,
+         help_scroll: int = 0,
+         mouse_enabled: bool = True) -> None:
     height, width = stdscr.getmaxyx()
     stdscr.erase()
 
@@ -1362,10 +1434,20 @@ def draw(stdscr, visible: List[Dict], total_count: int,
     # column header — built from visible columns; HOST entry is swapped for
     # IP when show_ip_in_host is True (handled in _build_active_cols).
     active_cols = _build_active_cols(cols_visible, show_ip_in_host, spark_len)
-    hdr_parts = [f"{label:{align}{w}}" for _, label, w, align, _ in active_cols]
-    hdr = " " + " ".join(hdr_parts)
-    safe_addstr(stdscr, HEADER_ROW, 0, hdr.ljust(width)[:width - 1],
-                curses.A_BOLD | curses.A_UNDERLINE)
+    # Horizontal column scrolling (←/→): the first column stays pinned,
+    # col_offset hides that many of the following columns on the left.
+    # "‹" after the pinned column / "›" at the right edge mark hidden ones.
+    shown_cols = active_cols[:1] + active_cols[1 + col_offset:]
+    hdr_raw    = " " + " ".join(f"{label:{align}{w}}" for _, label, w, align, _ in shown_cols)
+    cut_right  = len(hdr_raw) > width - 1
+    hdr        = hdr_raw.ljust(width)[:width - 1]
+    if col_offset > 0 and shown_cols:
+        p = 1 + shown_cols[0][2]          # separator right after the pinned column
+        if p < len(hdr):
+            hdr = hdr[:p] + "‹" + hdr[p + 1:]
+    if cut_right and len(hdr) >= 2:
+        hdr = hdr[:-1] + "›"
+    safe_addstr(stdscr, HEADER_ROW, 0, hdr, curses.A_BOLD | curses.A_UNDERLINE)
 
     # ghost row: when following an IP that's not currently visible, we
     # render a stale snapshot at the very bottom data row. Reserve that row
@@ -1381,15 +1463,15 @@ def draw(stdscr, visible: List[Dict], total_count: int,
     # If no visible column matches (e.g. sort_key="activity"), no overlay.
     sort_col_idx = None
     if bright_sort_col:
-        for i, (cid, _, _, _, _) in enumerate(active_cols):
+        for i, (cid, _, _, _, _) in enumerate(shown_cols):
             if cid == sort_key or (sort_key == "ip" and cid == "host"
                                     and show_ip_in_host):
                 sort_col_idx = i
                 break
     # Pre-compute the column's start column and width for the overlay.
     if sort_col_idx is not None:
-        sort_col_w     = active_cols[sort_col_idx][2]
-        sort_col_start = 1 + sum(active_cols[j][2] for j in range(sort_col_idx)) + sort_col_idx
+        sort_col_w     = shown_cols[sort_col_idx][2]
+        sort_col_start = 1 + sum(shown_cols[j][2] for j in range(sort_col_idx)) + sort_col_idx
     else:
         sort_col_w = sort_col_start = 0
 
@@ -1399,7 +1481,7 @@ def draw(stdscr, visible: List[Dict], total_count: int,
     for idx, c in enumerate(visible[scroll_top:scroll_top + page_rows]):
         row = FIRST_DATA_ROW + idx
         parts = []
-        for _, _, w, align, fn in active_cols:
+        for _, _, w, align, fn in shown_cols:
             s = fn(c)
             if len(s) > w:
                 s = s[:w]
@@ -1442,7 +1524,7 @@ def draw(stdscr, visible: List[Dict], total_count: int,
     # ghost row for the followed-but-vanished IP
     if ghost_active:
         parts = []
-        for _, _, w, align, fn in active_cols:
+        for _, _, w, align, fn in shown_cols:
             try:
                 s = fn(followed_snapshot)
             except Exception:
@@ -1489,7 +1571,8 @@ def draw(stdscr, visible: List[Dict], total_count: int,
         csv_part = "  CSV" if csv_enabled else ""
         alert_n  = sum(1 for v in alert_active.values() if v)
         a_part   = f"  ALERT:{alert_n}" if alert_n > 0 else ""
-        hint     = (f"sort:{sort_key}{arrow}{f_part}{g_part}{fol_part}{p_part}{csv_part}{a_part}"
+        c_part   = "  ←→:cols" if (cut_right or col_offset > 0) else ""
+        hint     = (f"sort:{sort_key}{arrow}{f_part}{g_part}{fol_part}{p_part}{csv_part}{a_part}{c_part}"
                     f"  /:filter  f:follow  g:group  o:opts  space:pause  h:help  q:quit ")
     gap    = max(1, width - len(totals) - len(hint))
     footer = (totals + " " * gap + hint).ljust(width)[:width - 1]
@@ -1498,7 +1581,7 @@ def draw(stdscr, visible: List[Dict], total_count: int,
     # Draw popup(s) BEFORE the single refresh so background and popup
     # appear in one frame — avoids flicker between two refresh calls.
     if show_help:
-        draw_help_popup(stdscr)
+        draw_help_popup(stdscr, help_scroll)
     if show_cols_popup:
         draw_columns_popup(stdscr, cols_visible, sort_key, cols_sel_idx,
                            active_tab_idx, focus_zone,
@@ -1510,7 +1593,8 @@ def draw(stdscr, visible: List[Dict], total_count: int,
                            show_seen_clients,
                            watchdog_enabled,
                            watchdog_path,
-                           spark_len)
+                           spark_len,
+                           mouse_enabled)
     if detail_text:
         draw_text_popup(stdscr, " Connection Detail ", detail_text)
 
@@ -1607,6 +1691,7 @@ def main(stdscr) -> None:
     # below. Colors are loaded before setup_colors so any theme / [colors]
     # overrides apply on the very first paint.
     cfg = load_config()
+    cfg.update(CLI_OVERRIDES)         # --port / --interval win over the config files
     if "port" in cfg:
         PORT = cfg["port"]
 
@@ -1632,6 +1717,8 @@ def main(stdscr) -> None:
     last_seen: Dict[str, float] = {}   # ip -> timestamp of latest appearance (live + ghost)
     seen_snapshot: Dict[str, Dict] = {}   # ip -> last-known conn dict (rates zeroed)
     show_seen_clients   = cfg.get("show_seen_clients", False)
+    mouse_enabled       = cfg.get("mouse", True)
+    _apply_mouse(mouse_enabled)
     baseline            = {}   # ip -> {"sent": X, "recv": X} at first sight
     prev_totals         = {}   # ip -> {"sent": X, "recv": X, "ts": float} for rate calc
     rate_history: Dict[str, List[float]] = {}   # ip -> rolling list of last SPARK_LEN total rates
@@ -1650,13 +1737,15 @@ def main(stdscr) -> None:
     SELECTION_TIMEOUT   = 5.0  # seconds without input → hide selection
     GG_TIMEOUT          = 0.5  # seconds a lone `g` waits for a second `g`
     scroll_top          = 0    # index of the first data row on screen
+    col_offset          = 0    # columns hidden left of the table (←/→), first column pinned
+    help_scroll         = 0    # first HELP_LINES entry shown in the help popup
     pending_g           = 0.0  # timestamp of a `g` awaiting `gg`; 0 = none
 
     # column visibility — defaults: all on except B/s, TREND, NFSv, MOUNT, RTT
     # (off by default). Persisted overrides from cfg apply on top.
     cols_visible: Dict[str, bool] = {
         col_id: col_id not in ("rate_sent", "rate_recv", "spark", "nfsv",
-                               "mount", "rtt_avg", "last_seen")
+                               "mount", "rtt_avg", "last_seen", "states")
         for col_id, *_ in COLUMNS
     }
     cols_visible.update(cfg.get("cols_visible", {}))
@@ -1724,6 +1813,41 @@ def main(stdscr) -> None:
                      and followed_ip not in {c["ip"] for c in visible})
         return data_rows(height, ghost)
 
+    def _move_cursor(step: int) -> None:
+        # Relative cursor move (arrows, PgUp/PgDn, wheel). Without a cursor
+        # it appears at the edge of the current viewport: top for downward
+        # moves, bottom for upward ones.
+        if not visible:
+            return
+        ips = [c["ip"] for c in visible]
+        if selected_ip in ips:
+            i = ips.index(selected_ip) + step
+        else:
+            page = _viewport_rows()
+            i = scroll_top if step > 0 else min(len(ips), scroll_top + page) - 1
+        _select_index(i)
+
+    def _mouse_event():
+        # (bstate, x, y) of the pending KEY_MOUSE, or None when curses has
+        # nothing for us (can happen with stale events after a mask change).
+        try:
+            _, mx, my, _, bstate = curses.getmouse()
+        except curses.error:
+            return None
+        return bstate, mx, my
+
+    def _wd_event(event: str, ip: str, host: str, sent: int, recv: int) -> None:
+        # One watchdog row (timestamp, event, ip, host, totals). Silent on
+        # OSError so a full disk can't crash the TUI.
+        if watchdog_writer is None:
+            return
+        try:
+            watchdog_writer.writerow([time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                      event, ip, host, sent, recv])
+            watchdog_file.flush()
+        except OSError:
+            pass
+
     def _select_index(i: int) -> None:
         # Move the cursor to visible[i] (clamped). In follow mode the pin
         # tracks the cursor. The viewport is realigned before draw().
@@ -1754,34 +1878,32 @@ def main(stdscr) -> None:
             raw        = get_connections()
             active_ips = {c["ip"] for c in raw}
 
+            prev_live = set(first_seen)          # last tick's live set (empty on the first tick)
             for c in raw:
                 if c["ip"] not in first_seen:
                     first_seen[c["ip"]]        = now
                     baseline[c["ip"]]          = {"sent": c["sent"], "recv": c["recv"]}
 
-            # Watchdog: emit a disconnect event for every IP that was live
-            # last tick but not this tick. first_seen at this point still
-            # contains last tick's live set (plus the newly-added IPs from
-            # the loop just above, which are subset of active_ips and so
-            # cancel out under set-difference). Snapshot data for the host /
-            # totals comes from seen_snapshot, populated during the previous
-            # tick. Silent on OSError so a full disk doesn't crash the TUI.
+            # Watchdog: one CSV row per transition, before stale cleanup.
+            # "disconnect": live last tick, gone now (host/totals from
+            # seen_snapshot, filled during the previous tick).
+            # "connect"/"reconnect": new this tick; "reconnect" when the IP
+            # was last seen within WATCHDOG_RECONNECT_SEC. The very first
+            # tick only populates the live set and logs nothing. No flap
+            # suppression — by design.
             if watchdog_enabled and watchdog_writer is not None:
-                disconnected = set(first_seen.keys()) - active_ips
-                if disconnected:
-                    ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
-                    try:
-                        for ip in disconnected:
-                            snap = seen_snapshot.get(ip, {})
-                            watchdog_writer.writerow([
-                                ts_iso, "disconnect", ip,
-                                snap.get("host", ip),
-                                snap.get("sent", 0),
-                                snap.get("recv", 0),
-                            ])
-                        watchdog_file.flush()
-                    except OSError:
-                        pass
+                raw_by_ip = {c["ip"]: c for c in raw}
+                for ip in sorted(prev_live - active_ips):
+                    snap = seen_snapshot.get(ip, {})
+                    _wd_event("disconnect", ip, snap.get("host", ip),
+                              snap.get("sent", 0), snap.get("recv", 0))
+                if last_tick:
+                    for ip in sorted(active_ips - prev_live):
+                        gone = (now - last_seen[ip]) if ip in last_seen else None
+                        kind = ("reconnect" if gone is not None and gone <= WATCHDOG_RECONNECT_SEC
+                                else "connect")
+                        c = raw_by_ip[ip]
+                        _wd_event(kind, ip, c["host"], c["sent"], c["recv"])
 
             # remove stale IPs from all per-ip state
             first_seen   = {ip: t for ip, t in first_seen.items()   if ip in active_ips}
@@ -1821,10 +1943,11 @@ def main(stdscr) -> None:
             # NFS-server-side per-client info (NFSv version, mount) — keyed by
             # IP. Only read what a visible column or the active sort needs;
             # the states files are the expensive part.
-            need_nfsv  = cols_visible.get("nfsv", True)  or sort_key == "nfsv"
-            need_mount = cols_visible.get("mount", True) or sort_key == "mount"
-            if need_nfsv or need_mount:
-                nfsd_info = read_nfsd_clients_info(need_mount=need_mount)
+            need_nfsv   = cols_visible.get("nfsv", True) or sort_key == "nfsv"
+            need_states = (cols_visible.get("mount", True) or cols_visible.get("states", True)
+                           or sort_key in ("mount", "states"))
+            if need_nfsv or need_states:
+                nfsd_info = read_nfsd_clients_info(need_states=need_states)
             else:
                 nfsd_info = {}
                 _set_health("nfsd", "")
@@ -1844,6 +1967,8 @@ def main(stdscr) -> None:
                     "spark":     sparkline(rate_history.get(c["ip"], []), spark_len),
                     "nfsv":      nfsd_info.get(c["ip"], {}).get("nfsv", ""),
                     "mount":     nfsd_info.get(c["ip"], {}).get("mount", ""),
+                    "states":    sum(nfsd_info.get(c["ip"], {}).get("states") or (0,)),
+                    "states_detail": nfsd_info.get(c["ip"], {}).get("states"),
                     "last_seen": now,
                 }
                 for c in raw
@@ -1887,17 +2012,21 @@ def main(stdscr) -> None:
 
             # alert detection — activity above threshold for >= duration
             # flips alert_active[ip] to True; reset when activity drops.
+            # Both transitions also go to the watchdog log when it is on.
             alert_threshold_bps = alert_mb * 1024 * 1024
             for c in conns:
                 ip = c["ip"]
                 if c["activity"] >= alert_threshold_bps:
                     if ip not in alert_since:
                         alert_since[ip] = now
-                    if now - alert_since[ip] >= alert_dur:
+                    if now - alert_since[ip] >= alert_dur and not alert_active.get(ip):
                         alert_active[ip] = True
+                        if watchdog_enabled:
+                            _wd_event("alert", ip, c["host"], c["sent"], c["recv"])
                 else:
                     alert_since.pop(ip, None)
-                    alert_active.pop(ip, None)
+                    if alert_active.pop(ip, None) and watchdog_enabled:
+                        _wd_event("alert_clear", ip, c["host"], c["sent"], c["recv"])
 
             # refresh ghost snapshot for the followed IP if it's still here
             if followed_ip:
@@ -2030,7 +2159,8 @@ def main(stdscr) -> None:
                                        show_seen_clients=show_seen_clients,
                                        watchdog_enabled=watchdog_enabled,
                                        watchdog_path=watchdog_path,
-                                       spark_len=spark_len):
+                                       spark_len=spark_len,
+                                       mouse=mouse_enabled):
                             snapshot_msg = f"config saved → {CONFIG_USER}"
                         else:
                             snapshot_msg = "config save failed"
@@ -2065,7 +2195,8 @@ def main(stdscr) -> None:
                                        show_seen_clients=show_seen_clients,
                                        watchdog_enabled=watchdog_enabled,
                                        watchdog_path=watchdog_path,
-                                       spark_len=spark_len):
+                                       spark_len=spark_len,
+                                       mouse=mouse_enabled):
                             snapshot_msg = f"config saved → {CONFIG_USER}"
                         else:
                             snapshot_msg = "config save failed"
@@ -2138,18 +2269,43 @@ def main(stdscr) -> None:
                                     watchdog_enabled = True
                                 except OSError:
                                     pass   # silent fail (e.g. permission denied)
+                        elif item[0] == "mouse":
+                            mouse_enabled = not mouse_enabled
+                            _apply_mouse(mouse_enabled)
                         elif item[0] == "spark_len":
                             edit_field = "spark_len"
                             edit_input = str(spark_len)
                 elif key == ord("v"):                                  # toggle sort dir from popup
                     sort_rev = not sort_rev
+            elif show_help and key in (curses.KEY_UP, curses.KEY_DOWN,
+                                       curses.KEY_PPAGE, curses.KEY_NPAGE,
+                                       curses.KEY_HOME, curses.KEY_END,
+                                       curses.KEY_MOUSE):
+                # while the help is open these scroll the help, not the table
+                h, w = stdscr.getmaxyx()
+                step = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                        curses.KEY_PPAGE: -PAGE_STEP,
+                        curses.KEY_NPAGE: PAGE_STEP}.get(key, 0)
+                if key == curses.KEY_MOUSE:
+                    ev = _mouse_event()
+                    if ev and ev[0] & MOUSE_WHEEL_UP:
+                        step = -MOUSE_STEP
+                    elif ev and ev[0] & MOUSE_WHEEL_DOWN:
+                        step = MOUSE_STEP
+                if key == curses.KEY_HOME:
+                    help_scroll = 0
+                elif key == curses.KEY_END:
+                    help_scroll = help_max_scroll(h, w)
+                else:
+                    help_scroll = max(0, min(help_scroll + step, help_max_scroll(h, w)))
             elif key == 27 and show_help:                              # Esc closes help
                 show_help = False
             elif key == ord("q"):
                 running = False
                 break
             elif key == ord("h"):
-                show_help = not show_help
+                show_help   = not show_help
+                help_scroll = 0
             elif key == ord("/"):
                 filter_saved        = filter_str
                 filter_input_active = True
@@ -2195,22 +2351,31 @@ def main(stdscr) -> None:
             elif key in (curses.KEY_UP, curses.KEY_DOWN,
                          curses.KEY_PPAGE, curses.KEY_NPAGE,
                          curses.KEY_HOME, curses.KEY_END) and visible:
-                ips  = [c["ip"] for c in visible]
-                step = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
-                        curses.KEY_PPAGE: -PAGE_STEP,
-                        curses.KEY_NPAGE: PAGE_STEP}.get(key, 0)
                 if key == curses.KEY_HOME:
-                    i = 0
+                    _select_index(0)
                 elif key == curses.KEY_END:
-                    i = len(ips) - 1
-                elif selected_ip in ips:
-                    i = ips.index(selected_ip) + step
+                    _select_index(len(visible) - 1)
                 else:
-                    # no cursor yet: it appears at the edge of the current
-                    # viewport (top for downward keys, bottom for upward)
-                    page = _viewport_rows()
-                    i = scroll_top if step > 0 else min(len(ips), scroll_top + page) - 1
-                _select_index(i)
+                    _move_cursor({curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                                  curses.KEY_PPAGE: -PAGE_STEP,
+                                  curses.KEY_NPAGE: PAGE_STEP}[key])
+            elif key == curses.KEY_MOUSE:
+                ev = _mouse_event()
+                if ev and visible:
+                    bstate, mx, my = ev
+                    if bstate & MOUSE_WHEEL_UP:
+                        _move_cursor(-MOUSE_STEP)
+                    elif bstate & MOUSE_WHEEL_DOWN:
+                        _move_cursor(MOUSE_STEP)
+                    elif bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED):
+                        i = scroll_top + (my - FIRST_DATA_ROW)
+                        if (FIRST_DATA_ROW <= my < FIRST_DATA_ROW + _viewport_rows()
+                                and 0 <= i < len(visible)):
+                            _select_index(i)
+            elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                # horizontal column scrolling; clamped against the column
+                # count before draw()
+                col_offset = max(0, col_offset + (1 if key == curses.KEY_RIGHT else -1))
             elif key == ord("G") and visible:          # vim: jump to last row
                 _select_index(len(visible) - 1)
             elif key in (10, 13, curses.KEY_ENTER) and visible:
@@ -2233,12 +2398,13 @@ def main(stdscr) -> None:
                 # text. Footer flashes a confirmation/error for
                 # SNAPSHOT_TIMEOUT seconds.
                 active_cols = _build_active_cols(cols_visible, show_ip_in_host, spark_len)
+                snap_path   = snapshot_path(now)
                 try:
-                    write_snapshot(SNAPSHOT_PATH, visible, len(display_source),
+                    write_snapshot(snap_path, visible, len(display_source),
                                    active_cols, sort_key, sort_rev,
                                    filter_str, group_subnet,
                                    followed_ip, paused, csv_enabled)
-                    snapshot_msg       = f"snapshot saved → {SNAPSHOT_PATH}"
+                    snapshot_msg       = f"snapshot saved → {snap_path}"
                 except OSError as e:
                     snapshot_msg       = f"snapshot failed: {e}"
                 snapshot_msg_until = now + SNAPSHOT_TIMEOUT
@@ -2260,7 +2426,9 @@ def main(stdscr) -> None:
         if not running:
             break
 
-        # ----- viewport: clamp the offset, keep the cursor on screen --------
+        # ----- viewport: clamp the offsets, keep the cursor on screen -------
+        n_cols     = len(_build_active_cols(cols_visible, show_ip_in_host, spark_len))
+        col_offset = max(0, min(col_offset, n_cols - 2))
         page_rows  = _viewport_rows()
         scroll_top = max(0, min(scroll_top, len(visible) - page_rows))
         if selected_ip:
@@ -2290,11 +2458,23 @@ def main(stdscr) -> None:
              watchdog_enabled,
              watchdog_path,
              spark_len,
-             scroll_top=scroll_top)
+             scroll_top=scroll_top,
+             col_offset=col_offset,
+             help_scroll=help_scroll,
+             mouse_enabled=mouse_enabled)
         time.sleep(0.1)
 
 
-def _parse_args() -> argparse.Namespace:
+def _int_in_range(lo: int, hi: int):
+    def conv(s: str) -> int:
+        v = int(s)
+        if not lo <= v <= hi:
+            raise argparse.ArgumentTypeError(f"must be between {lo} and {hi}")
+        return v
+    return conv
+
+
+def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="nfsmon",
         description="NFSv4 server-side traffic monitor (curses TUI).",
@@ -2305,11 +2485,23 @@ def _parse_args() -> argparse.Namespace:
         action="version",
         version=f"nfsmon v{__version__} {__author__}",
     )
-    return p.parse_args()
+    p.add_argument("--port", type=_int_in_range(1, 65535), metavar="N",
+                   help="TCP port to watch; overrides the config (default 2049)")
+    p.add_argument("--interval", type=_int_in_range(1, 9999), metavar="SEC",
+                   help="tick interval in seconds; overrides the config (default 2)")
+    p.add_argument("--config", metavar="FILE",
+                   help="user config to read and save instead of ~/.config/nfsmon.conf")
+    return p.parse_args(argv)
 
 
 if __name__ == "__main__":
-    _parse_args()
+    _args = _parse_args()
+    if _args.config:
+        CONFIG_USER = os.path.expanduser(_args.config)
+    if _args.port is not None:
+        CLI_OVERRIDES["port"] = _args.port
+    if _args.interval is not None:
+        CLI_OVERRIDES["interval"] = _args.interval
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:

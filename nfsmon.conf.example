@@ -26,7 +26,7 @@
 
 # Initial sort. sort_key is one of: sent / recv / dsent / drecv /
 # rate_sent / rate_recv / activity / conns / age / last_seen / ip /
-# host / nfsv / mount / rtt_avg. sort_rev = true → descending.
+# host / nfsv / mount / states / rtt_avg. sort_rev = true → descending.
 # (TREND has no sort key — sparkline strings aren't comparable.)
 # sort_key = sent
 # sort_rev = true
@@ -46,11 +46,17 @@
 # last live (e.g. "5m 30s", "2h", "3d"). Toggle in the [defaults] tab.
 # show_seen_clients = false
 
-# Watchdog — log a "disconnect" event line each time an IP transitions
-# from live (in the previous tick's connections) to absent (not in the
-# current tick). One row per event with timestamp, ip, host, last
+# Watchdog — log client transitions as CSV rows: disconnect (live last
+# tick, gone now), connect / reconnect (new this tick; "reconnect" when
+# last seen within 300 s), alert / alert_clear (threshold crossed /
+# cleared). One row per event with timestamp, event, ip, host, last
 # sent/recv totals. Toggle in the [defaults] tab; path is in [watchdog].
 # watchdog_enabled = false
+
+# Mouse support: wheel moves the cursor by 3 rows, left click selects the
+# row under the pointer. Set to false if you prefer the terminal's native
+# mouse handling (text selection without Shift). Toggle in [defaults].
+# mouse = true
 
 # TREND column width (sparkline length). Range 10-40, default 10.
 # Editable in the [defaults] tab — wider columns show more history but
@@ -70,6 +76,7 @@
 # host      = true
 # nfsv      = false
 # mount     = false
+# states    = false   ; "OPEN LCK DLG" — open files / locks / delegations held by the client
 # rtt_avg   = false
 # conns     = true
 # age       = true

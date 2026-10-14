@@ -61,7 +61,8 @@ class NfsdInfoTest(unittest.TestCase):
         self.exports(f"# Version 1.1\n{exp}\t10.0.0.0/20(ro,fsid=0)\n{exp}/nfs-home\t10.0.0.0/20(rw)\n")
         self.client("1", "10.0.10.113", self.rhel_states())
         info = nfsmon.read_nfsd_clients_info()
-        self.assertEqual(info["10.0.10.113"], {"nfsv": "4.2", "mount": f"{exp}/nfs-home"})
+        self.assertEqual(info["10.0.10.113"],
+                         {"nfsv": "4.2", "mount": f"{exp}/nfs-home", "states": (2, 0, 1)})
 
     def test_octal_escaped_export_path(self):
         os.makedirs(os.path.join(self.root, "exp two"))
@@ -95,11 +96,11 @@ class NfsdInfoTest(unittest.TestCase):
         self.assertEqual(nfsmon.read_nfsd_clients_info()["10.0.10.222"]["mount"],
                          "/export/home/turo")
 
-    def test_need_mount_false_skips_states(self):
+    def test_need_states_false_skips_states(self):
         self.exports("")
         self.client("1", "10.0.10.113", "THIS IS NOT PARSEABLE AND MUST NOT BE READ")
-        info = nfsmon.read_nfsd_clients_info(need_mount=False)
-        self.assertEqual(info["10.0.10.113"], {"nfsv": "4.2", "mount": ""})
+        info = nfsmon.read_nfsd_clients_info(need_states=False)
+        self.assertEqual(info["10.0.10.113"], {"nfsv": "4.2", "mount": "", "states": None})
 
     def test_health_warning_when_dir_missing_and_cleared_after(self):
         nfsmon.read_nfsd_clients_info()
