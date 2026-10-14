@@ -695,7 +695,9 @@ def _build_active_cols(cols_visible: Dict[str, bool], show_ip_in_host: bool,
     return out
 
 
-FIRST_DATA_ROW = 2   # rows 0 and 1 are the title and the column header
+TITLE_ROW      = 0   # screen layout: title, blank spacer, column header, data...
+HEADER_ROW     = 2
+FIRST_DATA_ROW = 3
 SCROLL_TRACK   = "│"  # scrollbar track glyph (last screen column)
 SCROLL_THUMB   = "█"  # scrollbar thumb glyph
 
@@ -704,7 +706,7 @@ def data_rows(height: int, ghost_active: bool) -> int:
     # Number of data rows that fit between the column header and the footer.
     # The follow-ghost row (when shown) reserves the line above the footer.
     # Single source of truth for draw() and the viewport logic in main().
-    reserved = 3 + (1 if ghost_active else 0)   # title + header + footer (+ ghost)
+    reserved = FIRST_DATA_ROW + 1 + (1 if ghost_active else 0)   # rows above data + footer (+ ghost)
     return max(1, height - reserved)
 
 
@@ -1190,6 +1192,13 @@ def aggregate_by_subnet(conns: List[Dict]) -> List[Dict]:
     return list(groups.values())
 
 
+def _live_rows(visible: List[Dict]) -> List[Dict]:
+    # Footer and snapshot totals count live clients only. Last-seen ghost
+    # rows (flagged "ghost" when stored in seen_snapshot) are display-only;
+    # summing them would add bytes of clients that left long ago.
+    return [c for c in visible if not c.get("ghost")]
+
+
 def write_snapshot(path: str, visible: List[Dict], total_count: int,
                    active_cols, sort_key: str, sort_rev: bool,
                    filter_str: str, group_subnet: bool,
@@ -1232,13 +1241,14 @@ def write_snapshot(path: str, visible: List[Dict], total_count: int,
             parts.append(f"{s:{align}{w}}")
         lines.append(" ".join(parts))
 
-    # footer totals
-    ts = bytes_human(sum(c["sent"] for c in visible))
-    tr = bytes_human(sum(c["recv"] for c in visible))
-    tc = sum(c["conns"] for c in visible)
+    # footer totals (live rows only, see _live_rows)
+    live = _live_rows(visible)
+    ts = bytes_human(sum(c["sent"] for c in live))
+    tr = bytes_human(sum(c["recv"] for c in live))
+    tc = sum(c["conns"] for c in live)
     lines.append("")
     if filter_str:
-        lines.append(f"clients:{len(visible)}/{total_count}  "
+        lines.append(f"clients:{len(live)}/{total_count}  "
                      f"conns:{tc}  sent:{ts}  recv:{tr}")
     else:
         lines.append(f"clients:{total_count}  total conns:{tc}  "
@@ -1289,14 +1299,14 @@ def draw(stdscr, visible: List[Dict], total_count: int,
              f"  interval:{interval}s"
              f"  since:{time.strftime('%H:%M:%S', time.localtime(start_time))}"
              f"  ({elapsed_str(start_time)}) ")
-    safe_addstr(stdscr, 0, 0, title.ljust(width)[:width - 1], C_TITLE)
+    safe_addstr(stdscr, TITLE_ROW, 0, title.ljust(width)[:width - 1], C_TITLE)
 
     # column header — built from visible columns; HOST entry is swapped for
     # IP when show_ip_in_host is True (handled in _build_active_cols).
     active_cols = _build_active_cols(cols_visible, show_ip_in_host, spark_len)
     hdr_parts = [f"{label:{align}{w}}" for _, label, w, align, _ in active_cols]
     hdr = " " + " ".join(hdr_parts)
-    safe_addstr(stdscr, 1, 0, hdr.ljust(width)[:width - 1],
+    safe_addstr(stdscr, HEADER_ROW, 0, hdr.ljust(width)[:width - 1],
                 curses.A_BOLD | curses.A_UNDERLINE)
 
     # ghost row: when following an IP that's not currently visible, we
@@ -1391,12 +1401,14 @@ def draw(stdscr, visible: List[Dict], total_count: int,
             safe_addstr(stdscr, height - 2, sort_col_start,
                         line[sort_col_start:seg_end], bright_attr)
 
-    # footer: totals (filtered if filter active) + right-side hint or input prompt
-    ts = bytes_human(sum(c["sent"] for c in visible))
-    tr = bytes_human(sum(c["recv"] for c in visible))
-    tc = sum(c["conns"] for c in visible)
+    # footer: totals over the live rows (filtered if a filter is active;
+    # ghost rows never count) + right-side hint or input prompt
+    live = _live_rows(visible)
+    ts = bytes_human(sum(c["sent"] for c in live))
+    tr = bytes_human(sum(c["recv"] for c in live))
+    tc = sum(c["conns"] for c in live)
     if filter_str or filter_input_active:
-        totals = (f" clients:{len(visible)}/{total_count}"
+        totals = (f" clients:{len(live)}/{total_count}"
                   f"  conns:{tc}  sent:{ts}  recv:{tr}")
     else:
         totals = f" clients:{total_count}  total conns:{tc}  sent:{ts}  recv:{tr}"
@@ -1784,6 +1796,7 @@ def main(stdscr) -> None:
                 snap["activity"]  = 0.0
                 snap["conns"]     = 0
                 snap["spark"]     = " " * spark_len
+                snap["ghost"]     = True     # display-only row: excluded from totals
                 seen_snapshot[ip] = snap
             last_tick = now
 

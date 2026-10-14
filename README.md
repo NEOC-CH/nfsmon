@@ -106,6 +106,7 @@ Quit anytime with `q` or `Ctrl-C`.
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │ NFS Traffic  port:2049  14:32:07  interval:2s  since:09:14:11 ...│  ← Title row
+│                                                                  │  ← Spacer
 │ HOST           CONNS  CONNECTED  SENT  ΔSENT  B/s SENT  ...      │  ← Header (bold + underline)
 │ vp-app-01.xxx.tld ...                                            │  ← Data rows (one per client)
 │ ...                                                              │
@@ -116,10 +117,11 @@ Quit anytime with `q` or `Ctrl-C`.
 ```
 
 - **Title row** — port, current time, tick interval, program start time
+- **Spacer** — one blank line separating the title from the table
 - **Header row** — active columns in their on-screen order; HOST flips to IP when the `Shift+i` toggle is active
 - **Data rows** — one per live NFS client; each row color-coded by throughput tier (idle / low / medium / high / alert)
 - **Ghost rows** — only when `Show last-seen clients` is on: clients that were once connected but aren't anymore — always below the live rows
-- **Footer** — totals on the left (clients/conns/sent/recv), status + hotkey hint on the right
+- **Footer** — totals on the left (clients/conns/sent/recv, live clients only — ghost rows never count), status + hotkey hint on the right
 
 Throughput color tiers (with the default theme):
 - **idle** — no activity (dimmed)
@@ -352,6 +354,10 @@ sorted by `sort_key` — but the ghost block always stays **below** the
 live block, regardless of direction.
 
 `l` is the direct hotkey for "Sort by SEEN".
+
+Ghost rows are display-only: the footer totals and the `Shift+d`
+snapshot sum up live clients only, so `sent`/`recv` stay consistent
+with the `clients` count.
 
 **Memory**: `last_seen`/`seen_snapshot` grow unbounded (one entry per
 IP we've ever seen). That's intentional — once seen, an IP stays
