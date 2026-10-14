@@ -65,11 +65,11 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(nfsmon.count_str(12), "12")
 
     def test_subnet_grouping_sums_state_counters(self):
-        rows = [row("10.0.10.1", 1, 1, 1, opens=2, locks=1, delegs=0),
-                row("10.0.10.2", 1, 1, 1, opens=4, locks=0, delegs=1),
-                row("10.0.20.9", 1, 1, 1, opens=7, locks=0, delegs=0)]
+        rows = [row("192.0.2.1", 1, 1, 1, opens=2, locks=1, delegs=0),
+                row("192.0.2.2", 1, 1, 1, opens=4, locks=0, delegs=1),
+                row("198.51.100.9", 1, 1, 1, opens=7, locks=0, delegs=0)]
         groups = {g["ip"]: g for g in nfsmon.aggregate_by_subnet(rows)}
-        a, b = groups["10.0.10.0/24"], groups["10.0.20.0/24"]
+        a, b = groups["192.0.2.0/24"], groups["198.51.100.0/24"]
         self.assertEqual((a["opens"], a["locks"], a["delegs"]), (6, 1, 1))
         self.assertEqual((b["opens"], b["locks"], b["delegs"]), (7, 0, 0))
         for cid in ("opens", "locks", "delegs"):          # every sort key keeps working while grouped
@@ -107,8 +107,8 @@ class HotkeySchemeTest(unittest.TestCase):
 class HostCellTest(unittest.TestCase):
     def test_dns_name_wins_then_client_name_then_ip(self):
         self.assertEqual(nfsmon.host_cell({"ip": "10.0.0.1", "host": "a.example", "client": "x"}), "a.example")
-        self.assertEqual(nfsmon.host_cell({"ip": "10.0.0.1", "host": "10.0.0.1", "client": "ge113.naz.ch"}),
-                         "~ge113.naz.ch")
+        self.assertEqual(nfsmon.host_cell({"ip": "10.0.0.1", "host": "10.0.0.1", "client": "client-01.example.com"}),
+                         "~client-01.example.com")
         self.assertEqual(nfsmon.host_cell({"ip": "10.0.0.1", "host": "10.0.0.1", "client": ""}), "10.0.0.1")
 
 

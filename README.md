@@ -11,9 +11,9 @@ aliases), and persistent configuration.
 ```
 NFS Traffic  port:2049  14:32:07  interval:2s  since:09:14:11  (05:17:56)
  HOST                            CONNS    CONNECTED        SENT       ΔSENT     B/s SENT
- vp-app-01.xxx.tld                   8     04:21:33      4.2 GiB    1.1 GiB   1.4 MiB/s
- vp-app-02.xxx.tld                   8     04:18:02      3.8 GiB  892.3 MiB   2.1 MiB/s
- vp-batch-03.xxx.tld                 4     03:55:11   821.4 MiB  120.5 MiB  340.2 KiB/s
+ app01.example.com                   8     04:21:33      4.2 GiB    1.1 GiB   1.4 MiB/s
+ app02.example.com                   8     04:18:02      3.8 GiB  892.3 MiB   2.1 MiB/s
+ batch03.example.com                 4     03:55:11   821.4 MiB  120.5 MiB  340.2 KiB/s
  ...
  clients:14  total conns:48  sent:18.4 GiB  recv:6.7 GiB    sort:sent↓  /:filter  o:opts ...
 ```
@@ -115,9 +115,9 @@ Quit anytime with `q` or `Ctrl-C`.
 │ NFS Traffic  port:2049  14:32:07  interval:2s  since:09:14:11 ...│  ← Title row
 │                                                                  │  ← Spacer
 │ HOST           CONNS  CONNECTED  SENT  ΔSENT  B/s SENT  ...      │  ← Header (bold + underline)
-│ vp-app-01.xxx.tld ...                                            │  ← Data rows (one per client)
+│ app01.example.com ...                                            │  ← Data rows (one per client)
 │ ...                                                              │
-│ vp-stale-99.xxx.tld ...                                10m 5s    │  ← Ghost rows (last-seen)
+│ stale99.example.com ...                                10m 5s    │  ← Ghost rows (last-seen)
 │                                                                  │
 │ clients:14  total conns:48  ...  sort:sent↓  /:filter  o:opts ...│  ← Footer (status + hint)
 └──────────────────────────────────────────────────────────────────┘
@@ -324,7 +324,7 @@ effectively the bright variant of the role.
   shows `Enter:apply  Esc:cancel`.
 - An active filter shows up in the hint as `filter:<text>`. Open the
   filter again with `/`; an empty string clears it.
-- `g` toggles **group by /24**. IPs are bucketed into `10.0.10.0/24`
+- `g` toggles **group by /24**. IPs are bucketed into `192.0.2.0/24`
   groups; numeric fields are summed, `age` is the oldest `first_seen`
   in the group. `RTT` stays empty (aggregation isn't meaningful).
 
@@ -449,7 +449,7 @@ When on, the tool writes **one row per client per tick** to
 
 ```csv
 timestamp,ip,host,sent,recv,dsent,drecv,rate_sent,rate_recv,conns
-2026-05-05T14:32:07,10.0.10.42,vp-app-01.xxx.tld,4523846542,1284567890,1182937462,403215100,1456823.45,512311.10,8
+2026-05-05T14:32:07,192.0.2.42,app01.example.com,4523846542,1284567890,1182937462,403215100,1456823.45,512311.10,8
 ```
 
 - Header is only written when the file is freshly created or empty
@@ -522,10 +522,10 @@ file (default `/var/log/nfsmon-events.log`, path configurable via
 
 ```csv
 timestamp,event,ip,host,last_sent,last_recv
-2026-05-05T14:32:07,disconnect,10.0.10.42,vp-app-01.xxx.tld,4523846542,1284567890
-2026-05-05T14:33:12,reconnect,10.0.10.42,vp-app-01.xxx.tld,4523846542,1284567890
-2026-05-05T14:40:01,alert,10.0.10.17,vp-batch-03.xxx.tld,9912345678,1200000
-2026-05-05T14:41:09,alert_clear,10.0.10.17,vp-batch-03.xxx.tld,9998765432,1300000
+2026-05-05T14:32:07,disconnect,192.0.2.42,app01.example.com,4523846542,1284567890
+2026-05-05T14:33:12,reconnect,192.0.2.42,app01.example.com,4523846542,1284567890
+2026-05-05T14:40:01,alert,192.0.2.17,batch03.example.com,9912345678,1200000
+2026-05-05T14:41:09,alert_clear,192.0.2.17,batch03.example.com,9998765432,1300000
 ```
 
 | event | when | last_sent / last_recv |

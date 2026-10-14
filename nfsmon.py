@@ -607,7 +607,7 @@ def _mount_from_exports(devs: Set[Tuple[int, int]],
 def read_nfsd_clients_info(need_states: bool = True) -> Dict[str, Dict]:
     # Parse /proc/fs/nfsd/clients/<id>/{info,states} per peer. Cheap small
     # reads (~30 files even on a busy server). Returns ip -> {"nfsv": "4.2",
-    # "mount": "/opt/exports/nfs-home", "states": (o, l, d), "client":
+    # "mount": "/export/home", "states": (o, l, d), "client":
     # "<name the client reported>", "kernel": "<client kernel release>"}.
     # mount is derived from the client's open files in `states`:
     #   * kernels that print absolute filenames -> longest common directory
@@ -1468,7 +1468,7 @@ def draw_text_popup(stdscr, title: str, text: str, scroll_y: int = 0, scroll_x: 
 
 
 def aggregate_by_subnet(conns: List[Dict]) -> List[Dict]:
-    # Bucket per IPv4 /24. The "host" label becomes "10.0.10.0/24"; numeric
+    # Bucket per IPv4 /24. The "host" label becomes "192.0.2.0/24"; numeric
     # fields sum up, age is the oldest first_seen in the group.
     groups: Dict[str, Dict] = {}
     for c in conns:

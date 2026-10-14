@@ -35,7 +35,7 @@ class NfsdInfoTest(unittest.TestCase):
         os.makedirs(d)
         with open(os.path.join(d, "info"), "w") as f:
             f.write(f'clientid: 0x1\naddress: "{ip}:739"\nstatus: confirmed\n'
-                    f'name: "Linux NFSv4.2 ge113.naz.ch"\nminor version: 2\n'
+                    f'name: "Linux NFSv4.2 client-01.example.com"\nminor version: 2\n'
                     f'Implementation name: "Linux 6.8.0-137-generic #137-Ubuntu SMP x86_64"\n')
         with open(os.path.join(d, "states"), "w") as f:
             f.write(states)
@@ -53,63 +53,63 @@ class NfsdInfoTest(unittest.TestCase):
                 f'- 0x2: {{ type: open, access: rw, deny: --, superblock: "{dev}:832205456", '
                 f'filename: "/", owner: "open id:\\x00" }}\n'
                 f'- 0x3: {{ type: deleg, access: w, superblock: "{dev}:3825630253", '
-                f'filename: ".coffer/turo.coffer" }}\n')
+                f'filename: ".config/alice.conf" }}\n')
 
     # -- tests --------------------------------------------------------------
     def test_pseudo_root_gives_way_to_sub_export(self):
         exp = os.path.join(self.root, "opt", "exports")
         os.makedirs(os.path.join(exp, "nfs-home"))
         self.exports(f"# Version 1.1\n{exp}\t10.0.0.0/20(ro,fsid=0)\n{exp}/nfs-home\t10.0.0.0/20(rw)\n")
-        self.client("1", "10.0.10.113", self.rhel_states())
+        self.client("1", "192.0.2.113", self.rhel_states())
         info = nfsmon.read_nfsd_clients_info()
-        self.assertEqual(info["10.0.10.113"],
+        self.assertEqual(info["192.0.2.113"],
                          {"nfsv": "4.2", "mount": f"{exp}/nfs-home", "states": (2, 0, 1),
-                          "client": "ge113.naz.ch", "kernel": "6.8.0-137-generic"})
+                          "client": "client-01.example.com", "kernel": "6.8.0-137-generic"})
 
     def test_octal_escaped_export_path(self):
         os.makedirs(os.path.join(self.root, "exp two"))
         self.exports(f"{self.root}/exp\\040two 10.0.0.0/20(rw)\n")
-        self.client("1", "10.0.10.113", self.rhel_states())
-        self.assertEqual(nfsmon.read_nfsd_clients_info()["10.0.10.113"]["mount"],
+        self.client("1", "192.0.2.113", self.rhel_states())
+        self.assertEqual(nfsmon.read_nfsd_clients_info()["192.0.2.113"]["mount"],
                          f"{self.root}/exp two")
 
     def test_sibling_exports_collapse_to_common_prefix(self):
         os.makedirs(os.path.join(self.root, "sib", "a"))
         os.makedirs(os.path.join(self.root, "sib", "b"))
         self.exports(f"{self.root}/sib/a *(rw)\n{self.root}/sib/b *(rw)\n")
-        self.client("1", "10.0.10.113", self.rhel_states())
-        self.assertEqual(nfsmon.read_nfsd_clients_info()["10.0.10.113"]["mount"],
+        self.client("1", "192.0.2.113", self.rhel_states())
+        self.assertEqual(nfsmon.read_nfsd_clients_info()["192.0.2.113"]["mount"],
                          f"{self.root}/sib")
 
     def test_unknown_device_or_no_states_is_empty(self):
         self.exports("/nonexistent *(rw)\n")
-        self.client("1", "10.0.10.113", self.rhel_states("ab:cd"))
-        self.client("2", "10.0.10.167", "")
+        self.client("1", "192.0.2.113", self.rhel_states("ab:cd"))
+        self.client("2", "192.0.2.167", "")
         info = nfsmon.read_nfsd_clients_info()
-        self.assertEqual(info["10.0.10.113"]["mount"], "")
-        self.assertEqual(info["10.0.10.167"]["mount"], "")
+        self.assertEqual(info["192.0.2.113"]["mount"], "")
+        self.assertEqual(info["192.0.2.167"]["mount"], "")
 
     def test_absolute_filenames_use_common_prefix(self):
         self.exports("")
-        self.client("1", "10.0.10.222",
-                    '- 0x1: { type: open, superblock: "fd:00:1", filename: "/export/home/turo/.bashrc", owner: "o" }\n'
-                    '- 0x2: { type: open, superblock: "fd:00:2", filename: "/export/home/turo/work/a.txt", owner: "o" }\n'
+        self.client("1", "192.0.2.222",
+                    '- 0x1: { type: open, superblock: "fd:00:1", filename: "/export/home/alice/.bashrc", owner: "o" }\n'
+                    '- 0x2: { type: open, superblock: "fd:00:2", filename: "/export/home/alice/work/a.txt", owner: "o" }\n'
                     '- 0x3: { type: open, superblock: "fd:00:3", filename: "/", owner: "o" }\n')
-        self.assertEqual(nfsmon.read_nfsd_clients_info()["10.0.10.222"]["mount"],
-                         "/export/home/turo")
+        self.assertEqual(nfsmon.read_nfsd_clients_info()["192.0.2.222"]["mount"],
+                         "/export/home/alice")
 
     def test_need_states_false_skips_states(self):
         self.exports("")
-        self.client("1", "10.0.10.113", "THIS IS NOT PARSEABLE AND MUST NOT BE READ")
+        self.client("1", "192.0.2.113", "THIS IS NOT PARSEABLE AND MUST NOT BE READ")
         info = nfsmon.read_nfsd_clients_info(need_states=False)
-        self.assertEqual(info["10.0.10.113"], {"nfsv": "4.2", "mount": "", "states": None,
-                                               "client": "ge113.naz.ch", "kernel": "6.8.0-137-generic"})
+        self.assertEqual(info["192.0.2.113"], {"nfsv": "4.2", "mount": "", "states": None,
+                                               "client": "client-01.example.com", "kernel": "6.8.0-137-generic"})
 
     def test_health_warning_when_dir_missing_and_cleared_after(self):
         nfsmon.read_nfsd_clients_info()
         self.assertTrue(any("nfsd" in w for w in nfsmon.health_warnings()))
         self.exports("")
-        self.client("1", "10.0.10.113", "")
+        self.client("1", "192.0.2.113", "")
         nfsmon.read_nfsd_clients_info()
         self.assertEqual(nfsmon.health_warnings(), [])
 
