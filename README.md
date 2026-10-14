@@ -205,7 +205,7 @@ aren't meaningfully comparable.
 | ----- | -------------------------------------- |
 | `h`   | Toggle help popup                      |
 | `q`   | Quit                                   |
-| `Esc` | Close popup / cancel input             |
+| `Esc` | Close popup / cancel input — acts at once (nfsmon sets the ncurses escape delay to 25 ms; the default 1 s made Esc feel stuck) |
 
 ---
 

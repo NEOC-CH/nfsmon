@@ -37,8 +37,9 @@ class PtyMixin:
         self.err = os.path.join(self.tmp, "child.err")
         self.master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 100, 0, 0))
-        # ESCDELAY: ncurses waits that long (ms, default 1000) after a lone ESC
-        env = dict(os.environ, TERM="xterm", HOME=self.tmp, LANG="C.UTF-8", ESCDELAY="50")
+        # no ESCDELAY override here on purpose: main() must make a lone Esc fast itself
+        env = dict(os.environ, TERM="xterm", HOME=self.tmp, LANG="C.UTF-8")
+        env.pop("ESCDELAY", None)
         self.errf = open(self.err, "w")
         self.proc = subprocess.Popen(
             [sys.executable, os.path.join(HERE, "tui_harness.py"), self.log, *harness_args],
@@ -117,7 +118,7 @@ class TuiTest(PtyMixin, unittest.TestCase):
         self.expect("detail wheel", self.send(mouse(65, 10, 5)), "detail=12/16")
         self.expect("detail end", self.send(END), "detail=52/16")
         self.expect("detail home", self.send(HOME), "detail=0/0")
-        self.expect("detail close", self.send("\x1b"), "detail=0/-", "sel=10.0.0.34")
+        self.expect("detail close (Esc, fast)", self.send("\x1b", wait=0.3), "detail=0/-", "sel=10.0.0.34")
         self.expect("back to idx 21", self.send(DOWN * 5), "scroll=14", "sel=10.0.0.29")
         self.expect("PgUp", self.send(PGUP), "scroll=11", "sel=10.0.0.39")
         self.expect("Up x12 clamps", self.send(UP * 12), "scroll=0", "sel=10.0.0.50")

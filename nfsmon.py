@@ -46,6 +46,8 @@ MOUSE_WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", 0x200000)   # BUTTON5_* ne
 
 CLI_OVERRIDES: Dict[str, int] = {}   # --port / --interval from argparse, applied over the config
 
+ESC_DELAY_MS = 25              # ncurses waits this long after a lone Esc for a sequence (default 1000!)
+
 DETAIL_TITLE = " Connection Detail "
 DETAIL_HSTEP = 8               # columns per ←/→ step in the detail popup
 
@@ -1914,6 +1916,15 @@ def main(stdscr) -> None:
     global PORT                       # mutable so the [defaults] tab can edit it
     curses.curs_set(0)
     stdscr.nodelay(True)
+    # A lone Esc must close popups at once. ncurses otherwise blocks the
+    # whole loop for ESCDELAY (1 s by default) waiting for an escape
+    # sequence. set_escdelay() needs Python >= 3.9; the environment variable
+    # set in __main__ covers older interpreters.
+    if hasattr(curses, "set_escdelay"):
+        try:
+            curses.set_escdelay(ESC_DELAY_MS)
+        except curses.error:
+            pass
 
     # Load persisted settings: CONFIG_SYSTEM (system) overridden by
     # CONFIG_USER (user). Missing keys fall back to the built-in defaults
@@ -2795,6 +2806,7 @@ if __name__ == "__main__":
         CLI_OVERRIDES["port"] = _args.port
     if _args.interval is not None:
         CLI_OVERRIDES["interval"] = _args.interval
+    os.environ.setdefault("ESCDELAY", str(ESC_DELAY_MS))   # read by ncurses at initscr()
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:
