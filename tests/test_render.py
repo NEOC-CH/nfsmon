@@ -59,19 +59,21 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(nfsmon.help_max_scroll(12, 100), max(0, len(nfsmon.HELP_LINES) - 8))
         self.assertEqual(nfsmon.help_max_scroll(500, 100), max(0, len(nfsmon.HELP_LINES) - 38))
 
-    def test_states_cell(self):
-        self.assertEqual(nfsmon.states_str(None), "")
-        self.assertEqual(nfsmon.states_str((0, 0, 0)), "")
-        self.assertEqual(nfsmon.states_str((12, 3, 5)), "  12   3   5")
+    def test_count_cell(self):
+        self.assertEqual(nfsmon.count_str(None), "")
+        self.assertEqual(nfsmon.count_str(0), "")
+        self.assertEqual(nfsmon.count_str(12), "12")
 
-    def test_subnet_grouping_sums_states(self):
-        rows = [row("10.0.10.1", 1, 1, 1, states=3, states_detail=(2, 1, 0)),
-                row("10.0.10.2", 1, 1, 1, states=5, states_detail=(4, 0, 1)),
-                row("10.0.20.9", 1, 1, 1, states=7, states_detail=(7, 0, 0))]
+    def test_subnet_grouping_sums_state_counters(self):
+        rows = [row("10.0.10.1", 1, 1, 1, opens=2, locks=1, delegs=0),
+                row("10.0.10.2", 1, 1, 1, opens=4, locks=0, delegs=1),
+                row("10.0.20.9", 1, 1, 1, opens=7, locks=0, delegs=0)]
         groups = {g["ip"]: g for g in nfsmon.aggregate_by_subnet(rows)}
-        self.assertEqual(groups["10.0.10.0/24"]["states"], 8)
-        self.assertEqual(groups["10.0.10.0/24"]["states_detail"], (6, 1, 1))
-        self.assertEqual(groups["10.0.20.0/24"]["states_detail"], (7, 0, 0))
+        a, b = groups["10.0.10.0/24"], groups["10.0.20.0/24"]
+        self.assertEqual((a["opens"], a["locks"], a["delegs"]), (6, 1, 1))
+        self.assertEqual((b["opens"], b["locks"], b["delegs"]), (7, 0, 0))
+        for cid in ("opens", "locks", "delegs"):          # every sort key keeps working while grouped
+            sorted(groups.values(), key=lambda x: x[cid])
 
     def test_snapshot_path_is_timestamped(self):
         p = nfsmon.snapshot_path(0)

@@ -26,7 +26,8 @@
 
 # Initial sort. sort_key is one of: sent / recv / dsent / drecv /
 # rate_sent / rate_recv / activity / conns / age / last_seen / ip /
-# host / nfsv / mount / states / rtt_avg. sort_rev = true → descending.
+# host / nfsv / mount / opens / locks / delegs / rtt_avg.
+# sort_rev = true → descending.
 # (TREND has no sort key — sparkline strings aren't comparable.)
 # sort_key = sent
 # sort_rev = true
@@ -76,7 +77,9 @@
 # host      = true
 # nfsv      = false
 # mount     = false
-# states    = false   ; "OPEN LCK DLG" — open files / locks / delegations held by the client
+# opens     = false   ; "OPEN" — open files held by the client (from /proc/fs/nfsd/clients/*/states)
+# locks     = false   ; "LCK"  — locks held by the client
+# delegs    = false   ; "DLG"  — delegations held by the client
 # rtt_avg   = false
 # conns     = true
 # age       = true

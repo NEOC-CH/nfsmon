@@ -684,7 +684,7 @@ KEY_MAP     = {"s": "sent",      "r": "recv",
                "i": "ip",        "H": "host",
                "n": "nfsv",      "m": "mount",
                "t": "rtt_avg",   "l": "last_seen",
-               "O": "states"}
+               "O": "opens",     "L": "locks",     "E": "delegs"}
 
 
 def elapsed_str(since: float) -> str:
@@ -718,13 +718,10 @@ def last_seen_str(ts: float) -> str:
     return f"{d}d {h}h" if d < 10 else f"{d}d"
 
 
-def states_str(detail) -> str:
-    # (opens, locks, delegations) from /proc/fs/nfsd/clients/*/states as a
-    # fixed-width cell; empty when nothing is held or the file wasn't read.
-    if not detail or not any(detail):
-        return ""
-    o, l, d = detail
-    return f"{o:>4} {l:>3} {d:>3}"
+def count_str(n) -> str:
+    # Per-client counters (OPEN/LCK/DLG): blank instead of "0" so the rows
+    # that actually hold something stand out; None (not read) is blank too.
+    return str(n) if n else ""
 
 
 # Column definitions drive the table header and data rows. Each entry is
@@ -734,7 +731,9 @@ COLUMNS = [
     ("host",      "HOST",      30, "<", lambda c: c["host"]),
     ("nfsv",      "NFSv",       4, "<", lambda c: c.get("nfsv", "")),
     ("mount",     "MOUNT",     24, "<", lambda c: c.get("mount", "")),
-    ("states",    "OPEN LCK DLG", 12, ">", lambda c: states_str(c.get("states_detail"))),
+    ("opens",     "OPEN",       5, ">", lambda c: count_str(c.get("opens"))),
+    ("locks",     "LCK",        4, ">", lambda c: count_str(c.get("locks"))),
+    ("delegs",    "DLG",        4, ">", lambda c: count_str(c.get("delegs"))),
     ("rtt_avg",   "RTT",        9, ">", lambda c: (f"{c['rtt_avg']:.1f} ms" if c.get("rtt_avg", 0) > 0 else "")),
     ("conns",     "CONNS",      6, ">", lambda c: str(c["conns"])),
     ("age",       "CONNECTED", 11, ">", lambda c: elapsed_str(c["age"])),
@@ -827,7 +826,9 @@ HELP_LINES = [
     ("  m",         "Sort by MOUNT"),
     ("  t",         "Sort by RTT (latency)"),
     ("  l",         "Sort by SEEN (last seen)"),
-    ("  Shift+o",   "Sort by OPEN (open files / locks / delegs)"),
+    ("  Shift+o",   "Sort by OPEN (open files)"),
+    ("  Shift+l",   "Sort by LCK (locks)"),
+    ("  Shift+e",   "Sort by DLG (delegations)"),
     ("  v",         "Toggle sort direction ↑↓"),
     ("─── View ─────────────────────────────────", None),
     ("  /",         "Filter by host or IP (substring)"),
@@ -1277,13 +1278,13 @@ def aggregate_by_subnet(conns: List[Dict]) -> List[Dict]:
                 # cells) so every sort_key remains usable while grouped
                 # instead of raising KeyError in compute_visible.
                 "nfsv": "", "mount": "", "spark": "", "last_seen": 0.0,
-                "states": 0, "states_detail": (0, 0, 0),
+                "opens": 0, "locks": 0, "delegs": 0,
             }
             groups[subnet] = g
         g["conns"] += c["conns"]
-        g["states"] += c.get("states", 0)
-        g["states_detail"] = tuple(a + b for a, b in
-                                   zip(g["states_detail"], c.get("states_detail") or (0, 0, 0)))
+        g["opens"]  += c.get("opens", 0)
+        g["locks"]  += c.get("locks", 0)
+        g["delegs"] += c.get("delegs", 0)
         g["sent"]  += c["sent"]
         g["recv"]  += c["recv"]
         g["dsent"] += c["dsent"]
@@ -1745,7 +1746,8 @@ def main(stdscr) -> None:
     # (off by default). Persisted overrides from cfg apply on top.
     cols_visible: Dict[str, bool] = {
         col_id: col_id not in ("rate_sent", "rate_recv", "spark", "nfsv",
-                               "mount", "rtt_avg", "last_seen", "states")
+                               "mount", "rtt_avg", "last_seen",
+                               "opens", "locks", "delegs")
         for col_id, *_ in COLUMNS
     }
     cols_visible.update(cfg.get("cols_visible", {}))
@@ -1943,9 +1945,10 @@ def main(stdscr) -> None:
             # NFS-server-side per-client info (NFSv version, mount) — keyed by
             # IP. Only read what a visible column or the active sort needs;
             # the states files are the expensive part.
+            states_cols = ("mount", "opens", "locks", "delegs")
             need_nfsv   = cols_visible.get("nfsv", True) or sort_key == "nfsv"
-            need_states = (cols_visible.get("mount", True) or cols_visible.get("states", True)
-                           or sort_key in ("mount", "states"))
+            need_states = (any(cols_visible.get(cid, True) for cid in states_cols)
+                           or sort_key in states_cols)
             if need_nfsv or need_states:
                 nfsd_info = read_nfsd_clients_info(need_states=need_states)
             else:
@@ -1967,8 +1970,9 @@ def main(stdscr) -> None:
                     "spark":     sparkline(rate_history.get(c["ip"], []), spark_len),
                     "nfsv":      nfsd_info.get(c["ip"], {}).get("nfsv", ""),
                     "mount":     nfsd_info.get(c["ip"], {}).get("mount", ""),
-                    "states":    sum(nfsd_info.get(c["ip"], {}).get("states") or (0,)),
-                    "states_detail": nfsd_info.get(c["ip"], {}).get("states"),
+                    "opens":     (nfsd_info.get(c["ip"], {}).get("states") or (0, 0, 0))[0],
+                    "locks":     (nfsd_info.get(c["ip"], {}).get("states") or (0, 0, 0))[1],
+                    "delegs":    (nfsd_info.get(c["ip"], {}).get("states") or (0, 0, 0))[2],
                     "last_seen": now,
                 }
                 for c in raw

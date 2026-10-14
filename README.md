@@ -161,7 +161,9 @@ Also reachable in the tool via `h`.
 | `m`       | Sort by **MOUNT**                                  |
 | `t`       | Sort by **RTT** (latency)                          |
 | `l`       | Sort by **SEEN** (last seen)                       |
-| `Shift+o` | Sort by **OPEN** (open files + locks + delegations) |
+| `Shift+o` | Sort by **OPEN** (open files)                      |
+| `Shift+l` | Sort by **LCK** (locks)                            |
+| `Shift+e` | Sort by **DLG** (delegations)                      |
 | `v`       | Toggle sort direction (↑/↓)                        |
 
 `TREND` (sparkline) intentionally has no hotkey — sparkline strings
@@ -272,7 +274,9 @@ active theme stay in the theme file and are layered on at start-up.
 | `HOST`      | on      | DNS name (reverse lookup), or IP when `Shift+i` is active                |
 | `NFSv`      | off     | Negotiated NFS version (`4.2`, `4.1`, ...) from `/proc/fs/nfsd/clients/*/info` |
 | `MOUNT`     | off     | Export (or common path prefix) the client's open files belong to — see Known limitations |
-| `OPEN LCK DLG` | off  | Open files / locks / delegations the client currently holds, from `/proc/fs/nfsd/clients/*/states` (column id `states`) |
+| `OPEN`      | off     | Open files the client currently holds, from `/proc/fs/nfsd/clients/*/states` (column id `opens`) |
+| `LCK`       | off     | Locks the client currently holds (column id `locks`)                     |
+| `DLG`       | off     | Delegations the client currently holds (column id `delegs`)              |
 | `RTT`       | off     | TCP RTT (averaged over all active connections, in ms) from `ss -ti`      |
 | `CONNS`     | on      | Number of active TCP connections from this client                        |
 | `CONNECTED` | on      | How long the client has been continuously connected (`HH:MM:SS` or `Xd HH:MM:SS`) |
