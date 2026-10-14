@@ -37,6 +37,7 @@ NFS Traffic  port:2049  14:32:07  interval:2s  since:09:14:11  (05:17:56)
 - [Snapshot dumps](#snapshot-dumps)
 - [CSV logging](#csv-logging)
 - [Alerts](#alerts)
+- [Server stats (title row)](#server-stats-title-row)
 - [Watchdog (event logging)](#watchdog-event-logging)
 - [Configurable TREND length](#configurable-trend-length)
 - [Themes and colors](#themes-and-colors)
@@ -164,6 +165,8 @@ Also reachable in the tool via `h`.
 | `Shift+o` | Sort by **OPEN** (open files)                      |
 | `Shift+l` | Sort by **LCK** (locks)                            |
 | `Shift+e` | Sort by **DLG** (delegations)                      |
+| `Shift+n` | Sort by **CLIENT** (client-reported name)          |
+| `Shift+k` | Sort by **KERNEL** (client kernel release)         |
 | `v`       | Toggle sort direction (↑/↓)                        |
 
 `TREND` (sparkline) intentionally has no hotkey — sparkline strings
@@ -180,7 +183,7 @@ aren't meaningfully comparable.
 | `gg` / `Shift+g`| Jump to the first / last row (vim style)   |
 | `←` / `→`       | Scroll columns horizontally; the first column stays pinned, `‹`/`›` in the header mark hidden columns |
 | Mouse           | Wheel moves the cursor 3 rows, left click selects a row (toggle in `[defaults]`) |
-| `Enter`         | Detail popup for the selected row          |
+| `Enter`         | Detail popup for the selected row; `↑`/`↓`/`PgUp`/`PgDn`/`Home`/`End`/wheel scroll it vertically, `←`/`→` horizontally, `Esc`/`q`/`Enter` close it |
 | `f`             | Follow mode (pin selection to an IP)       |
 | `g`             | Group by /24 subnet — applied 0.5 s after the key, or at once when another key follows (the delay is what tells `g` and `gg` apart) |
 | `Shift+i`       | HOST column: hostname ↔ IP toggle          |
@@ -225,6 +228,8 @@ rows, `space` toggles/activates, `Tab` jumps to the
 │  Show last-seen clients:  [ ]                                      │
 │  Watchdog (log events):  [ ]  /var/log/nfsmon-events.log           │
 │  Mouse (wheel scrolls, click selects):  [x]                        │
+│  Server stats in title row:  [x]                                   │
+│  Last-seen max age (h, 0=keep):  [   0]                            │
 │  TREND length:  [10]  (10-40)                                      │
 │                                                                    │
 │ Tab:save  ←→:tabs  ↑↓:sel  space:toggle  Esc:close   [Save Settings]│
@@ -245,6 +250,8 @@ Per-program settings:
 - **Show last-seen clients** — toggle. Previously-seen clients show up below the live ones as ghost rows.
 - **Watchdog (log events)** — toggle. Writes one CSV line per connect / reconnect / disconnect / alert / alert_clear event to `/var/log/nfsmon-events.log` (or the configured path). Path comes from `[watchdog] path` in the config.
 - **Mouse** — toggle. Wheel moves the cursor by 3 rows, a left click selects the row under the pointer. Off: the terminal's own mouse handling (text selection) is untouched.
+- **Server stats in title row** — toggle. Shows nfsd threads, RPC rate and NFS read/write payload rates on the right of the title row (see [Server stats](#server-stats-title-row)).
+- **Last-seen max age (h, 0=keep)** — numeric edit. Forget last-seen clients (ghost rows, `SEEN`) after this many hours; `0` keeps them for the lifetime of the process.
 - **TREND length** — numeric edit (10-40). Controls both the column width of the TREND column and the length of the per-IP sample buffer (`rate_history`). Default 10, max 40 — values out of range are clamped to the default at startup.
 
 ### Tab `[columns]`
@@ -271,8 +278,10 @@ active theme stay in the theme file and are layered on at start-up.
 
 | Column      | Default | Content                                                                  |
 | ----------- | ------- | ------------------------------------------------------------------------ |
-| `HOST`      | on      | DNS name (reverse lookup), or IP when `Shift+i` is active                |
+| `HOST`      | on      | DNS name (reverse lookup), or IP when `Shift+i` is active. Without a DNS answer the name the client reported in its NFSv4 client id is shown as `~name` |
+| `CLIENT`    | off     | Hostname the client put into its NFSv4 client id (`name:` in `/proc/fs/nfsd/clients/*/info`, column id `client`) — independent of DNS |
 | `NFSv`      | off     | Negotiated NFS version (`4.2`, `4.1`, ...) from `/proc/fs/nfsd/clients/*/info` |
+| `KERNEL`    | off     | Client kernel release from `Implementation name:` (e.g. `6.8.0-142-generic`, column id `kernel`) — handy for spotting outdated clients |
 | `MOUNT`     | off     | Export (or common path prefix) the client's open files belong to — see Known limitations |
 | `OPEN`      | off     | Open files the client currently holds, from `/proc/fs/nfsd/clients/*/states` (column id `opens`) |
 | `LCK`       | off     | Locks the client currently holds (column id `locks`)                     |
@@ -336,8 +345,12 @@ identifiable at the bottom.
   cursor auto-hide.
 - The selection auto-hides after 5 s of no input (except in follow
   mode).
-- `Enter` on the selection opens a detail popup with extra per-client
-  info (NFSv, mount, etc., depending on what `fetch_detail` returns).
+- `Enter` on the selection opens a detail popup with the raw `ss -ti`
+  lines of that peer and its `/proc/fs/nfsd/clients/<id>/info`. The
+  popup scrolls: `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End` and the wheel
+  vertically, `←`/`→` horizontally (8 columns per step); a scrollbar
+  on the right and a `rows a-b/n  cols a-b/n` tag in the bottom border
+  show where you are. `Esc`, `q` or `Enter` close it.
 - `f` toggles **follow**: the selection is pinned to the current IP
   (no auto-hide, no drop on disconnect). When the followed IP falls
   out of the visible set, its last snapshot row is rendered as a
@@ -378,11 +391,13 @@ Ghost rows are display-only: the footer totals and the `Shift+d`
 snapshot sum up live clients only, so `sent`/`recv` stay consistent
 with the `clients` count.
 
-**Memory**: `last_seen`/`seen_snapshot` grow unbounded (one entry per
-IP we've ever seen). That's intentional — once seen, an IP stays
-discoverable. In practice you get a few dozen to a few hundred IPs
-per day; even after weeks that's only a few MB. If you ever need a
-cap (e.g. only the last 24 h), add a cleanup loop every N ticks.
+**Memory**: by default `last_seen`/`seen_snapshot` grow unbounded (one
+entry per IP we've ever seen) — once seen, an IP stays discoverable.
+In practice that is a few dozen to a few hundred IPs per day, a few MB
+after weeks. If you want a cap, set **Last-seen max age** in the
+`[defaults]` tab (config key `seen_max_hours`, e.g. `24`): clients not
+seen for that long are dropped from both structures every tick. `0`
+(default) keeps everything.
 
 ---
 
@@ -462,6 +477,36 @@ each tick. If it stays ≥ `alert_mb * 1024 * 1024` (B/s) for at least
 Thresholds are editable in the popup (`Alert MB/s`, `Alert duration (s)`)
 and persisted via the config (`[alerts]` section: `threshold_mb`,
 `duration_sec`).
+
+---
+
+## Server stats (title row)
+
+Toggle: `o` → `[defaults]` → `Server stats in title row` → `space`. Default: on.
+
+The right end of the title row shows server-wide nfsd figures, refreshed
+every tick:
+
+```
+nfsd:70thr  rpc:198/s  rd:0 B/s  wr:812.6 KB/s
+```
+
+| Field | Source | Meaning |
+| --- | --- | --- |
+| `nfsd:Nthr` | `/proc/fs/nfsd/threads` | number of nfsd threads |
+| `rpc:N/s` | `rpc` line of `/proc/net/rpc/nfsd` | RPC calls per second |
+| `rd:` / `wr:` | `io` line of `/proc/net/rpc/nfsd` | NFS read / write payload per second — compare with the TCP byte totals in the footer to see protocol overhead |
+| `badrpc:N/s` | `rpc` line, bad calls | only shown while malformed / unauthenticated / unknown-client calls arrive |
+| `stalefh:N/s` | `fh` line | only shown while clients hit stale file handles |
+
+The two error fields switch the whole segment to the warning tier. When
+the title row is too narrow the segment moves to the spacer row below
+it. The `Shift+d` snapshot carries the same line in its header.
+
+Not shown on purpose: the queue counters in `/proc/fs/nfsd/pool_stats`.
+On 5.14-era kernels `sockets-enqueued` is incremented for every request,
+not only when all threads are busy, so it says nothing about thread
+starvation.
 
 ---
 
@@ -807,10 +852,9 @@ UI loop (every 100 ms):
   in favour of their sub-exports. Several exports on one filesystem
   collapse to their common prefix. A client without open files shows
   an empty cell.
-- **`last_seen` / `seen_snapshot` grow unbounded.** One entry per IP
-  ever seen. Practically harmless (KB range), but on servers with
-  thousands of distinct IPs per day this might matter. A cleanup pass
-  would have to be added.
+- **`last_seen` / `seen_snapshot` grow unbounded by default.** One
+  entry per IP ever seen. Practically harmless (KB range); on servers
+  with thousands of distinct IPs per day set `seen_max_hours` to cap it.
 - **Group-by /24 + last-seen clients**: ghost rows are deliberately
   **not** grouped. That's intentional (identifiability), but it means
   with /24 aggregation the live block is denser while the full ghost

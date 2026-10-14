@@ -46,6 +46,12 @@ MOUSE_WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", 0x200000)   # BUTTON5_* ne
 
 CLI_OVERRIDES: Dict[str, int] = {}   # --port / --interval from argparse, applied over the config
 
+DETAIL_TITLE = " Connection Detail "
+DETAIL_HSTEP = 8               # columns per ←/→ step in the detail popup
+
+NFSD_THREADS_PATH = "/proc/fs/nfsd/threads"
+RPC_NFSD_PATH     = "/proc/net/rpc/nfsd"
+
 DNS_TTL_OK   = 3600   # seconds a successful reverse lookup is cached
 DNS_TTL_FAIL = 300    # seconds before a failed reverse lookup is retried
 
@@ -238,7 +244,9 @@ def load_config() -> Dict:
                       ("show_seen_clients", "bool"),
                       ("watchdog_enabled", "bool"),
                       ("spark_len", "int"),
-                      ("mouse", "bool")):
+                      ("mouse", "bool"),
+                      ("server_stats", "bool"),
+                      ("seen_max_hours", "int")):
         v = _opt("general", key, kind)
         if v is not None:
             out[key] = v
@@ -291,7 +299,9 @@ def save_config(interval: int, port: int, group_subnet: bool,
                 watchdog_enabled: bool = False,
                 watchdog_path: str = WATCHDOG_DEFAULT_PATH,
                 spark_len: int = SPARK_LEN,
-                mouse: bool = True) -> bool:
+                mouse: bool = True,
+                server_stats: bool = True,
+                seen_max_hours: int = 0) -> bool:
     # Always writes to CONFIG_USER. System config CONFIG_SYSTEM stays
     # untouched. Creates the parent dir if needed. Returns True on success,
     # False on OSError. theme is a theme filename (without .conf) or "" for
@@ -310,6 +320,8 @@ def save_config(interval: int, port: int, group_subnet: bool,
         "watchdog_enabled":  "true" if watchdog_enabled else "false",
         "spark_len":         str(spark_len),
         "mouse":             "true" if mouse else "false",
+        "server_stats":      "true" if server_stats else "false",
+        "seen_max_hours":    str(seen_max_hours),
     }
     cp["csv"] = {
         "enabled": "true" if csv_enabled else "false",
@@ -593,8 +605,9 @@ def _mount_from_exports(devs: Set[Tuple[int, int]],
 def read_nfsd_clients_info(need_states: bool = True) -> Dict[str, Dict]:
     # Parse /proc/fs/nfsd/clients/<id>/{info,states} per peer. Cheap small
     # reads (~30 files even on a busy server). Returns ip -> {"nfsv": "4.2",
-    # "mount": "/opt/exports/nfs-home"}. mount is derived from the client's
-    # open files in `states`:
+    # "mount": "/opt/exports/nfs-home", "states": (o, l, d), "client":
+    # "<name the client reported>", "kernel": "<client kernel release>"}.
+    # mount is derived from the client's open files in `states`:
     #   * kernels that print absolute filenames -> longest common directory
     #     prefix of those paths;
     #   * kernels that print only the last two path components (RHEL 9's
@@ -630,9 +643,25 @@ def read_nfsd_clients_info(need_states: bool = True) -> Dict[str, Dict]:
             continue
         ip      = None
         version = None
+        client  = ""
+        kernel  = ""
         for line in info.splitlines():
             line = line.strip()
-            if line.startswith("address:"):
+            if line.startswith("name:"):
+                # client id string; Linux clients send "Linux NFSv4.x <hostname>"
+                m = re.search(r'"([^"]*)"', line)
+                if m:
+                    client = m.group(1)
+                    lm = re.match(r"Linux NFSv4\.\d+ (.+)$", client)
+                    if lm:
+                        client = lm.group(1)
+            elif line.startswith("Implementation name:"):
+                # e.g. "Linux 6.8.0-142-generic #142-Ubuntu SMP ..." → kernel release
+                m = re.search(r'"([^"]*)"', line)
+                if m:
+                    toks = m.group(1).split()
+                    kernel = toks[1] if len(toks) >= 2 and toks[0] == "Linux" else m.group(1)
+            elif line.startswith("address:"):
                 m = re.search(r'"([^"]+)"', line)
                 if m:
                     # strip trailing :port (works for both IPv4 "1.2.3.4:0"
@@ -667,12 +696,98 @@ def read_nfsd_clients_info(need_states: bool = True) -> Dict[str, Dict]:
                         export_devs = _export_devices()
                     mount = _mount_from_exports(devs, export_devs)
         if ip:
-            result[ip] = {"nfsv": version or "", "mount": mount, "states": detail}
+            result[ip] = {"nfsv": version or "", "mount": mount, "states": detail,
+                          "client": client, "kernel": kernel}
     if denied and not result:
         _set_health("nfsd", f"no access to {base}/*/info (run as root)")
     else:
         _set_health("nfsd", "")
     return result
+
+
+def read_server_stats() -> Dict[str, int]:
+    # Server-wide nfsd counters (raw, monotonic). main() turns them into
+    # per-tick rates via server_rates_from(). Missing files → fewer keys.
+    out: Dict[str, int] = {}
+    try:
+        with open(NFSD_THREADS_PATH) as f:
+            out["threads"] = int(f.read().strip())
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(RPC_NFSD_PATH) as f:
+            for line in f:
+                p = line.split()
+                if len(p) >= 3 and p[0] == "io":          # NFS payload bytes read / written
+                    out["io_read"], out["io_write"] = int(p[1]), int(p[2])
+                elif len(p) >= 3 and p[0] == "rpc":       # calls, bad calls (fmt+auth+clnt), ...
+                    out["rpc"], out["bad_rpc"] = int(p[1]), int(p[2])
+                elif len(p) >= 2 and p[0] == "fh":        # stale file handles, ...
+                    out["stale_fh"] = int(p[1])
+                elif len(p) >= 2 and p[0] == "th" and "threads" not in out:
+                    out["threads"] = int(p[1])
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def server_rates_from(prev: Dict, cur: Dict, now: float) -> Dict:
+    # Per-second rates between two read_server_stats() samples (prev carries
+    # its timestamp as "ts"). Counters that wrapped or are missing yield no
+    # rate rather than nonsense.
+    out: Dict = {"threads": cur.get("threads")}
+    if not prev or "ts" not in prev:
+        return out
+    dt = max(now - prev["ts"], 1e-6)
+    for key, name in (("rpc", "rpc_s"), ("io_read", "read_s"), ("io_write", "write_s"),
+                      ("bad_rpc", "badrpc_s"), ("stale_fh", "stale_s")):
+        if key in cur and key in prev and cur[key] >= prev[key]:
+            out[name] = (cur[key] - prev[key]) / dt
+    return out
+
+
+def fmt_rate(x: float) -> str:
+    # compact count rate: 198 → "198", 1234 → "1.2k", 2.5e6 → "2.5M"
+    if x >= 1e6:
+        return f"{x / 1e6:.1f}M"
+    if x >= 1e3:
+        return f"{x / 1e3:.1f}k"
+    return f"{x:.0f}"
+
+
+def server_stats_text(r: Dict) -> str:
+    # One-line server summary for the title row / snapshot header. Error
+    # counters only appear while they actually tick.
+    if not r:
+        return ""
+    parts = []
+    if r.get("threads") is not None:
+        parts.append(f"nfsd:{r['threads']}thr")
+    if r.get("rpc_s") is not None:
+        parts.append(f"rpc:{fmt_rate(r['rpc_s'])}/s")
+    if r.get("read_s") is not None:
+        parts.append(f"rd:{bytes_human(int(r['read_s']))}/s")
+    if r.get("write_s") is not None:
+        parts.append(f"wr:{bytes_human(int(r['write_s']))}/s")
+    if r.get("badrpc_s"):
+        parts.append(f"badrpc:{fmt_rate(r['badrpc_s'])}/s")
+    if r.get("stale_s"):
+        parts.append(f"stalefh:{fmt_rate(r['stale_s'])}/s")
+    return "  ".join(parts)
+
+
+def server_stats_warn(r: Dict) -> bool:
+    return bool(r.get("badrpc_s") or r.get("stale_s"))
+
+
+def prune_seen(last_seen: Dict[str, float], seen_snapshot: Dict[str, Dict], cutoff: float) -> int:
+    # Opt-in cap for the last-seen memory: forget clients not seen since
+    # `cutoff`. Live clients refresh last_seen every tick and never qualify.
+    stale = [ip for ip, ts in last_seen.items() if ts < cutoff]
+    for ip in stale:
+        last_seen.pop(ip, None)
+        seen_snapshot.pop(ip, None)
+    return len(stale)
 
 
 # ---------- curses UI -------------------------------------------------------
@@ -684,7 +799,8 @@ KEY_MAP     = {"s": "sent",      "r": "recv",
                "i": "ip",        "H": "host",
                "n": "nfsv",      "m": "mount",
                "t": "rtt_avg",   "l": "last_seen",
-               "O": "opens",     "L": "locks",     "E": "delegs"}
+               "O": "opens",     "L": "locks",     "E": "delegs",
+               "N": "client",    "K": "kernel"}
 
 
 def elapsed_str(since: float) -> str:
@@ -724,12 +840,23 @@ def count_str(n) -> str:
     return str(n) if n else ""
 
 
+def host_cell(c: Dict) -> str:
+    # Reverse-DNS name; while that is still the bare IP fall back to the
+    # name the client put into its NFSv4 client id, marked with "~".
+    host = c["host"]
+    if host == c["ip"] and c.get("client"):
+        return "~" + c["client"]
+    return host
+
+
 # Column definitions drive the table header and data rows. Each entry is
 # (id, label, width, align, value_fn). cols_visible[id] gates whether the
 # column is rendered; the order in COLUMNS is the on-screen order.
 COLUMNS = [
-    ("host",      "HOST",      30, "<", lambda c: c["host"]),
+    ("host",      "HOST",      30, "<", host_cell),
+    ("client",    "CLIENT",    24, "<", lambda c: c.get("client", "")),
     ("nfsv",      "NFSv",       4, "<", lambda c: c.get("nfsv", "")),
+    ("kernel",    "KERNEL",    18, "<", lambda c: c.get("kernel", "")),
     ("mount",     "MOUNT",     24, "<", lambda c: c.get("mount", "")),
     ("opens",     "OPEN",       5, ">", lambda c: count_str(c.get("opens"))),
     ("locks",     "LCK",        4, ">", lambda c: count_str(c.get("locks"))),
@@ -798,6 +925,8 @@ TABS = [
         ("seen",      "show_seen_clients", "Show last-seen clients"),
         ("watchdog",  "watchdog_enabled", "Watchdog (log events)"),
         ("mouse",     "mouse",            "Mouse (wheel scrolls, click selects)"),
+        ("sstats",    "server_stats",     "Server stats in title row"),
+        ("seen_max",  "seen_max_hours",   "Last-seen max age (h, 0=keep)"),
         ("spark_len", "spark_len",        "TREND length"),
     ]),
     ("columns",  "columns",
@@ -829,6 +958,8 @@ HELP_LINES = [
     ("  Shift+o",   "Sort by OPEN (open files)"),
     ("  Shift+l",   "Sort by LCK (locks)"),
     ("  Shift+e",   "Sort by DLG (delegations)"),
+    ("  Shift+n",   "Sort by CLIENT (client-reported name)"),
+    ("  Shift+k",   "Sort by KERNEL (client kernel)"),
     ("  v",         "Toggle sort direction ↑↓"),
     ("─── View ─────────────────────────────────", None),
     ("  /",         "Filter by host or IP (substring)"),
@@ -837,7 +968,7 @@ HELP_LINES = [
     ("  Home/End",  "Jump to first / last row (vim: gg / G)"),
     ("  ←/→",       "Scroll columns (first column stays)"),
     ("  Mouse",     "Wheel scrolls 3 rows, click selects"),
-    ("  Enter",     "Show detail (selected row)"),
+    ("  Enter",     "Show detail (↑↓←→ scroll, Esc closes)"),
     ("  f",         "Follow selection (pin / unpin)"),
     ("  g",         "Group by /24 subnet (gg jumps to top)"),
     ("  Shift+i",   "Toggle host column: hostname ↔ IP"),
@@ -910,9 +1041,14 @@ def draw_help_popup(stdscr, scroll: int = 0) -> None:
             break
         safe_addstr(stdscr, r, col0, "│" + " " * inner + "│", C_BOX)
 
-    # content rows (HELP_LINES) — overlay on the painted background
+    # content rows (HELP_LINES) — overlay on the painted background. When
+    # the list overflows, the last inner column carries a scrollbar (same
+    # look as the main table) so the overflow is visible at a glance.
     last_content = row0 + box_h - 2   # last writable row above bottom border
-    scroll = max(0, min(scroll, help_max_scroll(height, width)))
+    max_scroll   = help_max_scroll(height, width)
+    scroll       = max(0, min(scroll, max_scroll))
+    page_rows    = box_h - 2
+    bar          = max_scroll > 0
     for idx, (left, right) in enumerate(HELP_LINES[scroll:]):
         r = row0 + 1 + idx
         if r > last_content or r >= height:
@@ -927,9 +1063,22 @@ def draw_help_popup(stdscr, scroll: int = 0) -> None:
             safe_addstr(stdscr, r, col0 + 1, left[:inner], C_KEY)
             # bumped from col0+11 → col0+16 so "Shift+x" / "PgUp/PgDn" fit
             desc_col = col0 + 16
-            desc_max = (col0 + box_w - 1) - desc_col
+            desc_max = (col0 + box_w - 1) - desc_col - (1 if bar else 0)
             if desc_max > 0:
                 safe_addstr(stdscr, r, desc_col, right[:desc_max], C_TEXT)
+    if bar:
+        total    = len(HELP_LINES)
+        thumb_h  = max(1, round(page_rows * page_rows / total))
+        thumb_at = round(scroll * (page_rows - thumb_h) / max_scroll)
+        bar_col  = col0 + box_w - 2
+        for i in range(page_rows):
+            r = row0 + 1 + i
+            if r > last_content or r >= height:
+                break
+            if thumb_at <= i < thumb_at + thumb_h:
+                safe_addstr(stdscr, r, bar_col, SCROLL_THUMB, attr_for("footer") | curses.A_BOLD)
+            else:
+                safe_addstr(stdscr, r, bar_col, SCROLL_TRACK, attr_for("idle"))
 
     # bottom border — carries the scroll position when the list overflows
     bottom_row = row0 + box_h - 1
@@ -961,7 +1110,9 @@ def draw_columns_popup(stdscr, cols_visible: Dict[str, bool],
                        watchdog_enabled: bool = False,
                        watchdog_path: str = "",
                        spark_len: int = SPARK_LEN,
-                       mouse_enabled: bool = True) -> None:
+                       mouse_enabled: bool = True,
+                       server_stats_enabled: bool = True,
+                       seen_max_hours: int = 0) -> None:
     height, width = stdscr.getmaxyx()
     # Fixed target size (70×40, W×H) clamped to terminal so the popup never
     # changes size between tabs. Width was bumped from 60 to 70 to fit the
@@ -1114,6 +1265,21 @@ def draw_columns_popup(stdscr, cols_visible: Dict[str, bool],
             text  = f" {label}:  {mark}".ljust(inner)[:inner]
             attr  = C_TEXT | (curses.A_REVERSE if idx == sel_idx else 0)
             safe_addstr(stdscr, r, col0 + 1, text, attr)
+        elif kind == "sstats":
+            label = item[2]
+            mark  = "[x]" if server_stats_enabled else "[ ]"
+            text  = f" {label}:  {mark}".ljust(inner)[:inner]
+            attr  = C_TEXT | (curses.A_REVERSE if idx == sel_idx else 0)
+            safe_addstr(stdscr, r, col0 + 1, text, attr)
+        elif kind == "seen_max":
+            label = item[2]
+            if edit_field == "seen_max" and idx == sel_idx:
+                val_str = (edit_input + "_")[:5]
+            else:
+                val_str = str(seen_max_hours)
+            text = f" {label}:  [{val_str:>4}]".ljust(inner)[:inner]
+            attr = C_TEXT | (curses.A_REVERSE if idx == sel_idx else 0)
+            safe_addstr(stdscr, r, col0 + 1, text, attr)
         elif kind == "spark_len":
             label = item[2]
             if edit_field == "spark_len" and idx == sel_idx:
@@ -1159,7 +1325,8 @@ def compute_visible(connections: List[Dict], filter_str: str, group_subnet: bool
     if filter_str:
         f = filter_str.lower()
         connections = [c for c in connections
-                       if f in c["host"].lower() or f in c["ip"]]
+                       if f in c["host"].lower() or f in c["ip"]
+                          or f in c.get("client", "").lower()]
     if group_subnet:
         connections = aggregate_by_subnet(connections)
     return sorted(connections, key=lambda x: x[sort_key], reverse=sort_rev)
@@ -1218,18 +1385,35 @@ def fetch_detail(ip: str) -> str:
     return "\n".join(out_lines)
 
 
-def draw_text_popup(stdscr, title: str, text: str) -> None:
-    height, width = stdscr.getmaxyx()
-    raw_lines = text.splitlines() or [""]
-
-    longest = max((len(l) for l in raw_lines), default=0)
+def text_popup_geometry(text: str, title: str, height: int, width: int) -> Dict:
+    # Box placement and scroll limits for the detail popup, shared by the
+    # renderer and by main()'s key handling. Content wider/taller than the
+    # box scrolls: vertical bar in the last inner column, horizontal via
+    # ←/→ (DETAIL_HSTEP columns per step).
+    lines   = text.splitlines() or [""]
+    longest = max((len(l) for l in lines), default=0)
     box_w   = min(max(40, longest + 4, len(title) + 4), max(4, width - 2))
-    box_h   = min(len(raw_lines) + 2, max(3, height - 2))
+    box_h   = min(len(lines) + 2, max(3, height - 2))
+    page    = box_h - 2
+    vbar    = len(lines) > page
+    text_w  = max(1, (box_w - 2) - (1 if vbar else 0))
+    return {
+        "lines": lines, "longest": longest, "box_w": box_w, "box_h": box_h,
+        "row0": max(0, (height - box_h) // 2), "col0": max(0, (width - box_w) // 2),
+        "page": page, "vbar": vbar, "text_w": text_w,
+        "max_y": max(0, len(lines) - page), "max_x": max(0, longest - text_w),
+    }
+
+
+def draw_text_popup(stdscr, title: str, text: str, scroll_y: int = 0, scroll_x: int = 0) -> None:
+    height, width = stdscr.getmaxyx()
+    g = text_popup_geometry(text, title, height, width)
+    box_w, box_h, row0, col0 = g["box_w"], g["box_h"], g["row0"], g["col0"]
     if box_w < 4 or box_h < 3:
         return
-    row0  = max(0, (height - box_h) // 2)
-    col0  = max(0, (width  - box_w) // 2)
-    inner = box_w - 2
+    inner    = box_w - 2
+    scroll_y = max(0, min(scroll_y, g["max_y"]))
+    scroll_x = max(0, min(scroll_x, g["max_x"]))
 
     C_BOX  = attr_for("title")
     C_TEXT = attr_for("text")
@@ -1244,16 +1428,40 @@ def draw_text_popup(stdscr, title: str, text: str) -> None:
     safe_addstr(stdscr, row0, col0, top, C_BOX)
 
     bottom_row = row0 + box_h - 1
-    for idx, line in enumerate(raw_lines):
+    page, text_w = g["page"], g["text_w"]
+    for idx, line in enumerate(g["lines"][scroll_y:scroll_y + page]):
         r = row0 + 1 + idx
         if r >= bottom_row or r >= height:
             break
         safe_addstr(stdscr, r, col0, "│" + " " * inner + "│", C_BOX)
-        safe_addstr(stdscr, r, col0 + 1, line[:inner], C_TEXT)
+        safe_addstr(stdscr, r, col0 + 1, line[scroll_x:scroll_x + text_w], C_TEXT)
         safe_addstr(stdscr, r, col0 + box_w - 1, "│", C_BOX)
+    if g["vbar"]:
+        total    = len(g["lines"])
+        thumb_h  = max(1, round(page * page / total))
+        thumb_at = round(scroll_y * (page - thumb_h) / g["max_y"]) if g["max_y"] else 0
+        for i in range(page):
+            r = row0 + 1 + i
+            if r >= bottom_row or r >= height:
+                break
+            glyph, attr = ((SCROLL_THUMB, attr_for("footer") | curses.A_BOLD)
+                           if thumb_at <= i < thumb_at + thumb_h
+                           else (SCROLL_TRACK, attr_for("idle")))
+            safe_addstr(stdscr, r, col0 + box_w - 2, glyph, attr)
 
     if bottom_row < height:
-        safe_addstr(stdscr, bottom_row, col0, "└" + "─" * inner + "┘", C_BOX)
+        tags = []
+        if g["vbar"]:
+            tags.append(f"↑↓ rows {scroll_y + 1}-{min(len(g['lines']), scroll_y + page)}/{len(g['lines'])}")
+        if g["max_x"] > 0:
+            tags.append(f"←→ cols {scroll_x + 1}-{min(g['longest'], scroll_x + text_w)}/{g['longest']}")
+        if tags:
+            tag    = (" " + "  ".join(tags) + " ")[:inner]
+            pad    = inner - len(tag)
+            bottom = "└" + "─" * (pad // 2) + tag + "─" * (pad - pad // 2) + "┘"
+        else:
+            bottom = "└" + "─" * inner + "┘"
+        safe_addstr(stdscr, bottom_row, col0, bottom, C_BOX)
 
 
 def aggregate_by_subnet(conns: List[Dict]) -> List[Dict]:
@@ -1278,6 +1486,7 @@ def aggregate_by_subnet(conns: List[Dict]) -> List[Dict]:
                 # cells) so every sort_key remains usable while grouped
                 # instead of raising KeyError in compute_visible.
                 "nfsv": "", "mount": "", "spark": "", "last_seen": 0.0,
+                "client": "", "kernel": "",
                 "opens": 0, "locks": 0, "delegs": 0,
             }
             groups[subnet] = g
@@ -1323,7 +1532,7 @@ def write_snapshot(path: str, visible: List[Dict], total_count: int,
                    active_cols, sort_key: str, sort_rev: bool,
                    filter_str: str, group_subnet: bool,
                    followed_ip: Optional[str], paused: bool,
-                   csv_enabled: bool) -> None:
+                   csv_enabled: bool, server_line: str = "") -> None:
     # Plain-text snapshot of the currently visible (filtered/grouped/sorted)
     # view, written to `path`. Mirrors the on-screen rendering using the
     # same column metadata so the dump matches what the user is looking at.
@@ -1342,6 +1551,8 @@ def write_snapshot(path: str, visible: List[Dict], total_count: int,
         "  ".join(state_parts),
         "",
     ]
+    if server_line:
+        lines.insert(2, server_line)
 
     # column header + underline rule
     hdr_parts = [f"{label:{align}{w}}" for _, label, w, align, _ in active_cols]
@@ -1410,7 +1621,13 @@ def draw(stdscr, visible: List[Dict], total_count: int,
          scroll_top: int = 0,
          col_offset: int = 0,
          help_scroll: int = 0,
-         mouse_enabled: bool = True) -> None:
+         mouse_enabled: bool = True,
+         server_line: str = "",
+         server_warn: bool = False,
+         server_stats_enabled: bool = True,
+         seen_max_hours: int = 0,
+         detail_y: int = 0,
+         detail_x: int = 0) -> None:
     height, width = stdscr.getmaxyx()
     stdscr.erase()
 
@@ -1424,13 +1641,21 @@ def draw(stdscr, visible: List[Dict], total_count: int,
              f"  since:{time.strftime('%H:%M:%S', time.localtime(start_time))}"
              f"  ({elapsed_str(start_time)}) ")
     safe_addstr(stdscr, TITLE_ROW, 0, title.ljust(width)[:width - 1], C_TITLE)
+    used  = len(title)
     warns = health_warnings()
-    if warns and len(title) + 2 < width - 1:
+    if warns and used + 2 < width - 1:
         # data-source problems (no ss, no /proc/fs/nfsd access) — shown in
         # the warning tier so an empty column is never a silent mystery
-        safe_addstr(stdscr, TITLE_ROW, len(title) + 1,
-                    (" ! " + "  ! ".join(warns) + " ")[:width - 1 - len(title) - 1],
-                    attr_for("activity_medium"))
+        seg = (" ! " + "  ! ".join(warns) + " ")[:width - 1 - used - 1]
+        safe_addstr(stdscr, TITLE_ROW, used + 1, seg, attr_for("activity_medium"))
+        used += 1 + len(seg)
+    if server_line:
+        # server-wide nfsd stats, right-aligned in the title row; when the
+        # row is too narrow they move to the spacer row below it
+        attr  = attr_for("activity_medium") if server_warn else C_FOOTER
+        s_row = TITLE_ROW if used + 2 + len(server_line) <= width - 1 else TITLE_ROW + 1
+        seg   = server_line[-(width - 1):]
+        safe_addstr(stdscr, s_row, max(0, width - 1 - len(seg)), seg, attr)
 
     # column header — built from visible columns; HOST entry is swapped for
     # IP when show_ip_in_host is True (handled in _build_active_cols).
@@ -1595,9 +1820,11 @@ def draw(stdscr, visible: List[Dict], total_count: int,
                            watchdog_enabled,
                            watchdog_path,
                            spark_len,
-                           mouse_enabled)
+                           mouse_enabled,
+                           server_stats_enabled,
+                           seen_max_hours)
     if detail_text:
-        draw_text_popup(stdscr, " Connection Detail ", detail_text)
+        draw_text_popup(stdscr, DETAIL_TITLE, detail_text, detail_y, detail_x)
 
     stdscr.refresh()
 
@@ -1720,6 +1947,12 @@ def main(stdscr) -> None:
     show_seen_clients   = cfg.get("show_seen_clients", False)
     mouse_enabled       = cfg.get("mouse", True)
     _apply_mouse(mouse_enabled)
+    server_stats_enabled = cfg.get("server_stats", True)
+    server_prev:  Dict  = {}   # last read_server_stats() sample + "ts"
+    server_rates: Dict  = {}   # per-second rates for the title row
+    seen_max_hours      = cfg.get("seen_max_hours", 0)       # 0 = keep last-seen forever
+    if not 0 <= seen_max_hours <= 9999:
+        seen_max_hours = 0
     baseline            = {}   # ip -> {"sent": X, "recv": X} at first sight
     prev_totals         = {}   # ip -> {"sent": X, "recv": X, "ts": float} for rate calc
     rate_history: Dict[str, List[float]] = {}   # ip -> rolling list of last SPARK_LEN total rates
@@ -1732,6 +1965,8 @@ def main(stdscr) -> None:
     frozen_conns        = None # snapshot taken at pause; None = follow live
     selected_ip         = None # currently highlighted row (by IP)
     detail_text         = ""   # non-empty → detail popup is open
+    detail_y            = 0    # detail popup scroll offsets (rows / columns)
+    detail_x            = 0
     last_input_time     = time.time()  # for 5s auto-hide of selection
     running             = True
     PAGE_STEP           = 10   # rows per PgUp/PgDn jump
@@ -1747,7 +1982,7 @@ def main(stdscr) -> None:
     cols_visible: Dict[str, bool] = {
         col_id: col_id not in ("rate_sent", "rate_recv", "spark", "nfsv",
                                "mount", "rtt_avg", "last_seen",
-                               "opens", "locks", "delegs")
+                               "opens", "locks", "delegs", "client", "kernel")
         for col_id, *_ in COLUMNS
     }
     cols_visible.update(cfg.get("cols_visible", {}))
@@ -1942,18 +2177,14 @@ def main(stdscr) -> None:
                 if len(h) > spark_len:
                     del h[: len(h) - spark_len]
 
-            # NFS-server-side per-client info (NFSv version, mount) — keyed by
-            # IP. Only read what a visible column or the active sort needs;
-            # the states files are the expensive part.
+            # NFS-server-side per-client info — keyed by IP. The small `info`
+            # files are always read (NFSv, CLIENT, KERNEL and the HOST
+            # fallback need them); the large `states` files only when a
+            # column or the active sort needs them.
             states_cols = ("mount", "opens", "locks", "delegs")
-            need_nfsv   = cols_visible.get("nfsv", True) or sort_key == "nfsv"
             need_states = (any(cols_visible.get(cid, True) for cid in states_cols)
                            or sort_key in states_cols)
-            if need_nfsv or need_states:
-                nfsd_info = read_nfsd_clients_info(need_states=need_states)
-            else:
-                nfsd_info = {}
-                _set_health("nfsd", "")
+            nfsd_info   = read_nfsd_clients_info(need_states=need_states)
 
             # merge age + delta + rate + spark + nfsv + mount + activity
             # into each connection. `activity` = combined live rate, used as
@@ -1970,6 +2201,8 @@ def main(stdscr) -> None:
                     "spark":     sparkline(rate_history.get(c["ip"], []), spark_len),
                     "nfsv":      nfsd_info.get(c["ip"], {}).get("nfsv", ""),
                     "mount":     nfsd_info.get(c["ip"], {}).get("mount", ""),
+                    "client":    nfsd_info.get(c["ip"], {}).get("client", ""),
+                    "kernel":    nfsd_info.get(c["ip"], {}).get("kernel", ""),
                     "opens":     (nfsd_info.get(c["ip"], {}).get("states") or (0, 0, 0))[0],
                     "locks":     (nfsd_info.get(c["ip"], {}).get("states") or (0, 0, 0))[1],
                     "delegs":    (nfsd_info.get(c["ip"], {}).get("states") or (0, 0, 0))[2],
@@ -1993,6 +2226,18 @@ def main(stdscr) -> None:
                 snap["spark"]     = " " * spark_len
                 snap["ghost"]     = True     # display-only row: excluded from totals
                 seen_snapshot[ip] = snap
+
+            # opt-in cap for the last-seen memory (0 = keep forever)
+            if seen_max_hours > 0:
+                prune_seen(last_seen, seen_snapshot, now - seen_max_hours * 3600)
+
+            # server-wide nfsd counters → per-tick rates for the title row
+            if server_stats_enabled:
+                cur          = read_server_stats()
+                server_rates = server_rates_from(server_prev, cur, now)
+                server_prev  = {**cur, "ts": now}
+            else:
+                server_rates = {}
             last_tick = now
 
             # CSV logging — one row per peer per tick when enabled. Wrapped
@@ -2054,7 +2299,8 @@ def main(stdscr) -> None:
             if filter_str:
                 f = filter_str.lower()
                 ghost_list = [c for c in ghost_list
-                              if f in c["host"].lower() or f in c["ip"]]
+                              if f in c["host"].lower() or f in c["ip"]
+                          or f in c.get("client", "").lower()]
             ghost_list = sorted(ghost_list,
                                 key=lambda x: x.get(sort_key, 0) if isinstance(x.get(sort_key), (int, float))
                                               else x.get(sort_key, ""),
@@ -2107,6 +2353,27 @@ def main(stdscr) -> None:
             elif detail_text:                                          # detail popup is open
                 if key in (27, ord("q"), 10, 13, curses.KEY_ENTER):
                     detail_text = ""
+                else:
+                    # scroll the popup: ↑↓/PgUp/PgDn/Home/End/wheel vertically,
+                    # ←/→ horizontally (long ss lines)
+                    h, w = stdscr.getmaxyx()
+                    g = text_popup_geometry(detail_text, DETAIL_TITLE, h, w)
+                    dy = {curses.KEY_UP: -1, curses.KEY_DOWN: 1,
+                          curses.KEY_PPAGE: -g["page"], curses.KEY_NPAGE: g["page"]}.get(key, 0)
+                    dx = {curses.KEY_LEFT: -DETAIL_HSTEP, curses.KEY_RIGHT: DETAIL_HSTEP}.get(key, 0)
+                    if key == curses.KEY_MOUSE:
+                        ev = _mouse_event()
+                        if ev and ev[0] & MOUSE_WHEEL_UP:
+                            dy = -MOUSE_STEP
+                        elif ev and ev[0] & MOUSE_WHEEL_DOWN:
+                            dy = MOUSE_STEP
+                    if key == curses.KEY_HOME:
+                        detail_y = detail_x = 0
+                    elif key == curses.KEY_END:
+                        detail_y = g["max_y"]
+                    else:
+                        detail_y = max(0, min(detail_y + dy, g["max_y"]))
+                        detail_x = max(0, min(detail_x + dx, g["max_x"]))
             elif show_cols_popup:                                      # options popup is open
                 # focus_zone toggles between "main" (tab bar + body items)
                 # and "save" (the [Save Settings] button at bottom-right).
@@ -2136,6 +2403,8 @@ def main(stdscr) -> None:
                                 alert_dur = v
                             elif edit_field == "spark_len" and SPARK_MIN_LEN <= v <= SPARK_MAX_LEN:
                                 spark_len = v
+                            elif edit_field == "seen_max" and 0 <= v <= 9999:
+                                seen_max_hours = v
                         except ValueError:
                             pass
                         edit_field = None
@@ -2164,7 +2433,9 @@ def main(stdscr) -> None:
                                        watchdog_enabled=watchdog_enabled,
                                        watchdog_path=watchdog_path,
                                        spark_len=spark_len,
-                                       mouse=mouse_enabled):
+                                       mouse=mouse_enabled,
+                                       server_stats=server_stats_enabled,
+                                       seen_max_hours=seen_max_hours):
                             snapshot_msg = f"config saved → {CONFIG_USER}"
                         else:
                             snapshot_msg = "config save failed"
@@ -2200,7 +2471,9 @@ def main(stdscr) -> None:
                                        watchdog_enabled=watchdog_enabled,
                                        watchdog_path=watchdog_path,
                                        spark_len=spark_len,
-                                       mouse=mouse_enabled):
+                                       mouse=mouse_enabled,
+                                       server_stats=server_stats_enabled,
+                                       seen_max_hours=seen_max_hours):
                             snapshot_msg = f"config saved → {CONFIG_USER}"
                         else:
                             snapshot_msg = "config save failed"
@@ -2276,6 +2549,13 @@ def main(stdscr) -> None:
                         elif item[0] == "mouse":
                             mouse_enabled = not mouse_enabled
                             _apply_mouse(mouse_enabled)
+                        elif item[0] == "sstats":
+                            server_stats_enabled = not server_stats_enabled
+                            if not server_stats_enabled:
+                                server_rates, server_prev = {}, {}
+                        elif item[0] == "seen_max":
+                            edit_field = "seen_max"
+                            edit_input = str(seen_max_hours)
                         elif item[0] == "spark_len":
                             edit_field = "spark_len"
                             edit_input = str(spark_len)
@@ -2385,6 +2665,7 @@ def main(stdscr) -> None:
             elif key in (10, 13, curses.KEY_ENTER) and visible:
                 target = selected_ip if selected_ip in [c["ip"] for c in visible] else visible[0]["ip"]
                 detail_text = fetch_detail(target)
+                detail_y = detail_x = 0
                 selected_ip = target
                 break                                                  # popup opened; stop draining
             elif key == ord("A"):
@@ -2407,7 +2688,8 @@ def main(stdscr) -> None:
                     write_snapshot(snap_path, visible, len(display_source),
                                    active_cols, sort_key, sort_rev,
                                    filter_str, group_subnet,
-                                   followed_ip, paused, csv_enabled)
+                                   followed_ip, paused, csv_enabled,
+                                   server_stats_text(server_rates))
                     snapshot_msg       = f"snapshot saved → {snap_path}"
                 except OSError as e:
                     snapshot_msg       = f"snapshot failed: {e}"
@@ -2465,7 +2747,13 @@ def main(stdscr) -> None:
              scroll_top=scroll_top,
              col_offset=col_offset,
              help_scroll=help_scroll,
-             mouse_enabled=mouse_enabled)
+             mouse_enabled=mouse_enabled,
+             server_line=server_stats_text(server_rates),
+             server_warn=server_stats_warn(server_rates),
+             server_stats_enabled=server_stats_enabled,
+             seen_max_hours=seen_max_hours,
+             detail_y=detail_y,
+             detail_x=detail_x)
         time.sleep(0.1)
 
 

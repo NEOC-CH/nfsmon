@@ -37,7 +37,8 @@ class PtyMixin:
         self.err = os.path.join(self.tmp, "child.err")
         self.master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 100, 0, 0))
-        env = dict(os.environ, TERM="xterm", HOME=self.tmp, LANG="C.UTF-8")
+        # ESCDELAY: ncurses waits that long (ms, default 1000) after a lone ESC
+        env = dict(os.environ, TERM="xterm", HOME=self.tmp, LANG="C.UTF-8", ESCDELAY="50")
         self.errf = open(self.err, "w")
         self.proc = subprocess.Popen(
             [sys.executable, os.path.join(HERE, "tui_harness.py"), self.log, *harness_args],
@@ -108,6 +109,15 @@ class TuiTest(PtyMixin, unittest.TestCase):
         self.expect("help scrolls", self.send(DOWN * 3), "help=3", "sel=10.0.0.34")
         self.expect("help wheel", self.send(mouse(65, 10, 5)), "help=6")
         self.expect("help close", self.send("h"), "help=-", "sel=10.0.0.34")
+        # detail popup: 60 lines x 200 cols inside a 12x100 pty → page 8, box width 98
+        self.expect("detail open", self.send("\r"), "detail=0/0", "sel=10.0.0.34")
+        self.expect("detail down", self.send(DOWN), "detail=1/0")
+        self.expect("detail pgdn", self.send(PGDN), "detail=9/0")
+        self.expect("detail right", self.send("\x1bOC" * 2), "detail=9/16")
+        self.expect("detail wheel", self.send(mouse(65, 10, 5)), "detail=12/16")
+        self.expect("detail end", self.send(END), "detail=52/16")
+        self.expect("detail home", self.send(HOME), "detail=0/0")
+        self.expect("detail close", self.send("\x1b"), "detail=0/-", "sel=10.0.0.34")
         self.expect("back to idx 21", self.send(DOWN * 5), "scroll=14", "sel=10.0.0.29")
         self.expect("PgUp", self.send(PGUP), "scroll=11", "sel=10.0.0.39")
         self.expect("Up x12 clamps", self.send(UP * 12), "scroll=0", "sel=10.0.0.50")

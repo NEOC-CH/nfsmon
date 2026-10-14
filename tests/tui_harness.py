@@ -55,6 +55,8 @@ else:
     nfsmon.get_connections = static_connections
 
 nfsmon.read_nfsd_clients_info = lambda need_states=True: {}
+nfsmon.read_server_stats = lambda: {}
+nfsmon.fetch_detail = lambda ip: "\n".join(f"line {i:02d} " + "x" * 200 for i in range(60))
 log = open(sys.argv[1], "w")
 orig_draw = nfsmon.draw
 
@@ -65,7 +67,8 @@ def draw(stdscr, visible, *a, **kw):
     # show_ip_in_host, selected_ip, ...
     log.write(f"scroll={kw.get('scroll_top')} sel={a[9]} group={a[7]} "
               f"n={len(visible)} rows={stdscr.getmaxyx()[0]} "
-              f"col={kw.get('col_offset')} help={kw.get('help_scroll') if a[4] else '-'}\n")
+              f"col={kw.get('col_offset')} help={kw.get('help_scroll') if a[4] else '-'} "
+              f"detail={kw.get('detail_y')}/{kw.get('detail_x') if a[11] else '-'}\n")
     log.flush()
     return orig_draw(stdscr, visible, *a, **kw)
 

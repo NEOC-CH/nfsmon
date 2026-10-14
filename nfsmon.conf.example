@@ -26,8 +26,8 @@
 
 # Initial sort. sort_key is one of: sent / recv / dsent / drecv /
 # rate_sent / rate_recv / activity / conns / age / last_seen / ip /
-# host / nfsv / mount / opens / locks / delegs / rtt_avg.
-# sort_rev = true → descending.
+# host / client / nfsv / kernel / mount / opens / locks / delegs /
+# rtt_avg. sort_rev = true → descending.
 # (TREND has no sort key — sparkline strings aren't comparable.)
 # sort_key = sent
 # sort_rev = true
@@ -59,6 +59,15 @@
 # mouse handling (text selection without Shift). Toggle in [defaults].
 # mouse = true
 
+# Server-wide nfsd stats (threads, rpc/s, NFS read/write payload per
+# second, error counters while they tick) at the right end of the title
+# row. Toggle in [defaults].
+# server_stats = true
+
+# Forget last-seen clients (ghost rows / SEEN column) after this many
+# hours; 0 = keep for the lifetime of the process. Editable in [defaults].
+# seen_max_hours = 0
+
 # TREND column width (sparkline length). Range 10-40, default 10.
 # Editable in the [defaults] tab — wider columns show more history but
 # eat horizontal space. Out-of-range values from config are clamped
@@ -75,7 +84,9 @@
 [columns]
 # Column visibility — set to false to hide. Defaults shown here:
 # host      = true
+# client    = false   ; "CLIENT" — hostname the client reports in its NFSv4 client id
 # nfsv      = false
+# kernel    = false   ; "KERNEL" — client kernel release from Implementation name
 # mount     = false
 # opens     = false   ; "OPEN" — open files held by the client (from /proc/fs/nfsd/clients/*/states)
 # locks     = false   ; "LCK"  — locks held by the client

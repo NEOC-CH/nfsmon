@@ -35,7 +35,8 @@ class NfsdInfoTest(unittest.TestCase):
         os.makedirs(d)
         with open(os.path.join(d, "info"), "w") as f:
             f.write(f'clientid: 0x1\naddress: "{ip}:739"\nstatus: confirmed\n'
-                    f'name: "Linux NFSv4.2 x"\nminor version: 2\n')
+                    f'name: "Linux NFSv4.2 ge113.naz.ch"\nminor version: 2\n'
+                    f'Implementation name: "Linux 6.8.0-137-generic #137-Ubuntu SMP x86_64"\n')
         with open(os.path.join(d, "states"), "w") as f:
             f.write(states)
 
@@ -62,7 +63,8 @@ class NfsdInfoTest(unittest.TestCase):
         self.client("1", "10.0.10.113", self.rhel_states())
         info = nfsmon.read_nfsd_clients_info()
         self.assertEqual(info["10.0.10.113"],
-                         {"nfsv": "4.2", "mount": f"{exp}/nfs-home", "states": (2, 0, 1)})
+                         {"nfsv": "4.2", "mount": f"{exp}/nfs-home", "states": (2, 0, 1),
+                          "client": "ge113.naz.ch", "kernel": "6.8.0-137-generic"})
 
     def test_octal_escaped_export_path(self):
         os.makedirs(os.path.join(self.root, "exp two"))
@@ -100,7 +102,8 @@ class NfsdInfoTest(unittest.TestCase):
         self.exports("")
         self.client("1", "10.0.10.113", "THIS IS NOT PARSEABLE AND MUST NOT BE READ")
         info = nfsmon.read_nfsd_clients_info(need_states=False)
-        self.assertEqual(info["10.0.10.113"], {"nfsv": "4.2", "mount": "", "states": None})
+        self.assertEqual(info["10.0.10.113"], {"nfsv": "4.2", "mount": "", "states": None,
+                                               "client": "ge113.naz.ch", "kernel": "6.8.0-137-generic"})
 
     def test_health_warning_when_dir_missing_and_cleared_after(self):
         nfsmon.read_nfsd_clients_info()

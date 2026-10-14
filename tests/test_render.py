@@ -81,6 +81,88 @@ class LayoutTest(unittest.TestCase):
         self.assertRegex(os.path.basename(p), r"^nfsmon_snapshot_\d{8}-\d{6}\.txt$")
 
 
+class HostCellTest(unittest.TestCase):
+    def test_dns_name_wins_then_client_name_then_ip(self):
+        self.assertEqual(nfsmon.host_cell({"ip": "10.0.0.1", "host": "a.example", "client": "x"}), "a.example")
+        self.assertEqual(nfsmon.host_cell({"ip": "10.0.0.1", "host": "10.0.0.1", "client": "ge113.naz.ch"}),
+                         "~ge113.naz.ch")
+        self.assertEqual(nfsmon.host_cell({"ip": "10.0.0.1", "host": "10.0.0.1", "client": ""}), "10.0.0.1")
+
+
+class ServerStatsTest(unittest.TestCase):
+    RPC = ("rc 0 0 562873286\nfh 2137 0 0 0 0\nio 1651606918399 3042621246437\n"
+           "th 70 0 0.000 0.000\nrpc 562807003 23 23 0 0\nproc4 2 29997 562843289\n")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="nfsmon-srv-")
+        self._saved = (nfsmon.NFSD_THREADS_PATH, nfsmon.RPC_NFSD_PATH)
+        nfsmon.NFSD_THREADS_PATH = os.path.join(self.tmp, "threads")
+        nfsmon.RPC_NFSD_PATH = os.path.join(self.tmp, "nfsd")
+
+    def tearDown(self):
+        nfsmon.NFSD_THREADS_PATH, nfsmon.RPC_NFSD_PATH = self._saved
+
+    def write(self, threads, rpc):
+        with open(nfsmon.NFSD_THREADS_PATH, "w") as f:
+            f.write(threads)
+        with open(nfsmon.RPC_NFSD_PATH, "w") as f:
+            f.write(rpc)
+
+    def test_parse_real_format(self):
+        self.write("70\n", self.RPC)
+        self.assertEqual(nfsmon.read_server_stats(),
+                         {"threads": 70, "stale_fh": 2137, "io_read": 1651606918399,
+                          "io_write": 3042621246437, "rpc": 562807003, "bad_rpc": 23})
+
+    def test_missing_files_give_empty_dict(self):
+        self.assertEqual(nfsmon.read_server_stats(), {})
+        self.assertEqual(nfsmon.server_stats_text({}), "")
+
+    def test_rates_and_text(self):
+        prev = {"threads": 70, "rpc": 1000, "io_read": 0, "io_write": 1_000_000, "bad_rpc": 5, "stale_fh": 9, "ts": 100.0}
+        cur  = {"threads": 70, "rpc": 1400, "io_read": 0, "io_write": 2_600_000, "bad_rpc": 5, "stale_fh": 9}
+        r = nfsmon.server_rates_from(prev, cur, 102.0)
+        self.assertEqual(r["threads"], 70)
+        self.assertAlmostEqual(r["rpc_s"], 200.0)
+        self.assertAlmostEqual(r["write_s"], 800_000.0)
+        self.assertEqual(nfsmon.server_stats_text(r), "nfsd:70thr  rpc:200/s  rd:0.0 B/s  wr:781.2 KB/s")
+        self.assertFalse(nfsmon.server_stats_warn(r))
+        cur2 = dict(cur, bad_rpc=7)
+        r2 = nfsmon.server_rates_from(prev, cur2, 102.0)
+        self.assertIn("badrpc:1/s", nfsmon.server_stats_text(r2))
+        self.assertTrue(nfsmon.server_stats_warn(r2))
+
+    def test_first_sample_and_counter_wrap(self):
+        self.assertEqual(nfsmon.server_rates_from({}, {"threads": 8, "rpc": 5}, 1.0), {"threads": 8})
+        r = nfsmon.server_rates_from({"rpc": 10, "ts": 0.0}, {"rpc": 3}, 1.0)   # wrapped → no rate
+        self.assertNotIn("rpc_s", r)
+
+    def test_fmt_rate(self):
+        self.assertEqual([nfsmon.fmt_rate(x) for x in (0, 198.4, 1234, 2_500_000)], ["0", "198", "1.2k", "2.5M"])
+
+
+class PruneSeenTest(unittest.TestCase):
+    def test_drops_only_entries_older_than_cutoff(self):
+        last = {"a": 100.0, "b": 500.0, "c": 900.0}
+        snap = {"a": {}, "b": {}, "c": {}}
+        self.assertEqual(nfsmon.prune_seen(last, snap, 600.0), 2)
+        self.assertEqual(set(last), {"c"})
+        self.assertEqual(set(snap), {"c"})
+        self.assertEqual(nfsmon.prune_seen(last, snap, 600.0), 0)
+
+
+class TextPopupTest(unittest.TestCase):
+    def test_geometry_limits(self):
+        text = "\n".join("x" * 200 for _ in range(60))
+        g = nfsmon.text_popup_geometry(text, nfsmon.DETAIL_TITLE, 12, 100)
+        self.assertEqual((g["box_h"], g["box_w"], g["page"]), (10, 98, 8))
+        self.assertTrue(g["vbar"])
+        self.assertEqual(g["text_w"], 95)                 # 96 inner minus the scrollbar column
+        self.assertEqual((g["max_y"], g["max_x"]), (52, 105))
+        small = nfsmon.text_popup_geometry("short\ntext", nfsmon.DETAIL_TITLE, 40, 120)
+        self.assertEqual((small["max_y"], small["max_x"], small["vbar"]), (0, 0, False))
+
+
 class CliTest(unittest.TestCase):
     def test_overrides_parse_and_validate(self):
         a = nfsmon._parse_args(["--port", "20049", "--interval", "5", "--config", "/tmp/x.conf"])
